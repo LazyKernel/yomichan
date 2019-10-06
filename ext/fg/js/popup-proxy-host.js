@@ -40,8 +40,8 @@ class PopupProxyHost {
             createNestedPopup: ({parentId}) => this.createNestedPopup(parentId),
             show: ({id, elementRect, options}) => this.show(id, elementRect, options),
             showOrphaned: ({id, elementRect, options}) => this.show(id, elementRect, options),
-            hide: ({id}) => this.hide(id),
-            setVisible: ({id, visible}) => this.setVisible(id, visible),
+            hide: ({id, changeFocus}) => this.hide(id, changeFocus),
+            setVisibleOverride: ({id, visible}) => this.setVisibleOverride(id, visible),
             containsPoint: ({id, x, y}) => this.containsPoint(id, x, y),
             termsShow: ({id, elementRect, writingMode, definitions, options, context}) => this.termsShow(id, elementRect, writingMode, definitions, options, context),
             kanjiShow: ({id, elementRect, writingMode, definitions, options, context}) => this.kanjiShow(id, elementRect, writingMode, definitions, options, context),
@@ -98,14 +98,14 @@ class PopupProxyHost {
         return await popup.showOrphaned(elementRect, options);
     }
 
-    async hide(id) {
+    async hide(id, changeFocus) {
         const popup = this.getPopup(id);
-        return popup.hide();
+        return popup.hide(changeFocus);
     }
 
-    async setVisible(id, visible) {
+    async setVisibleOverride(id, visible) {
         const popup = this.getPopup(id);
-        return popup.setVisible(visible);
+        return popup.setVisibleOverride(visible);
     }
 
     async containsPoint(id, x, y) {

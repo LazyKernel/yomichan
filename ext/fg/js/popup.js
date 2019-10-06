@@ -34,6 +34,9 @@ class Popup {
         this.container.style.height = '0px';
         this.injectPromise = null;
         this.isInjected = false;
+        this.visible = false;
+        this.visibleOverride = null;
+        this.updateVisibility();
     }
 
     inject(options) {
@@ -56,16 +59,18 @@ class Popup {
         return new Promise((resolve) => {
             const parentFrameId = (typeof this.frameId === 'number' ? this.frameId : null);
             this.container.addEventListener('load', () => {
-                this.invokeApi('popupNestedInitialize', {
-                    id: this.id,
-                    depth: this.depth,
-                    parentFrameId,
+                this.invokeApi('initialize', {
+                    options: {
+                        general: {
+                            customPopupCss: options.general.customPopupCss
+                        }
+                    },
+                    popupInfo: {
+                        id: this.id,
+                        depth: this.depth,
+                        parentFrameId
+                    },
                     url: this.url
-                });
-                this.invokeApi('setOptions', {
-                    general: {
-                        customPopupCss: options.general.customPopupCss
-                    }
                 });
                 resolve();
             });
@@ -103,9 +108,11 @@ class Popup {
         container.style.top = `${y}px`;
         container.style.width = `${width}px`;
         container.style.height = `${height}px`;
-        container.style.visibility = 'visible';
 
-        this.hideChildren();
+        this.setVisible(true);
+        if (this.child !== null) {
+            this.child.hide(true);
+        }
     }
 
     static getPositionForHorizontalText(elementRect, width, height, maxWidth, maxHeight, optionsGeneral) {
@@ -206,37 +213,36 @@ class Popup {
         this.invokeApi('orphaned');
     }
 
-    hide() {
-        this.hideChildren();
-        this.hideContainer();
-        this.focusParent();
-    }
-
-    hideChildren() {
-        // recursively hides all children
-        if (this.child && !this.child.isContainerHidden()) {
-            this.child.hide();
+    hide(changeFocus) {
+        if (!this.isVisible()) {
+            return;
         }
-    }
 
-    hideContainer() {
-        this.container.style.visibility = 'hidden';
-    }
-
-    isContainerHidden() {
-        return (this.container.style.visibility === 'hidden');
+        this.setVisible(false);
+        if (this.child !== null) {
+            this.child.hide(false);
+        }
+        if (changeFocus) {
+            this.focusParent();
+        }
     }
 
     isVisible() {
-        return this.isInjected && this.container.style.visibility !== 'hidden';
+        return this.isInjected && (this.visibleOverride !== null ? this.visibleOverride : this.visible);
     }
 
     setVisible(visible) {
-        if (visible) {
-            this.container.style.setProperty('display', '');
-        } else {
-            this.container.style.setProperty('display', 'none', 'important');
-        }
+        this.visible = visible;
+        this.updateVisibility();
+    }
+
+    setVisibleOverride(visible) {
+        this.visibleOverride = visible;
+        this.updateVisibility();
+    }
+
+    updateVisibility() {
+        this.container.style.setProperty('visibility', this.isVisible() ? 'visible' : 'hidden', 'important');
     }
 
     focusParent() {

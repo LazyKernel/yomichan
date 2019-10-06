@@ -17,103 +17,76 @@
  */
 
 
-class Deinflection {
-    constructor(term, {rules=[], definitions=[], reason=''} = {}) {
-        this.term = term;
-        this.rules = rules;
-        this.definitions = definitions;
-        this.reason = reason;
-        this.children = [];
-    }
-
-    async deinflect(definer, reasons) {
-        for (const reason in reasons) {
-            for (const variant of reasons[reason]) {
-                let accept = this.rules.length === 0;
-                if (!accept) {
-                    for (const rule of this.rules) {
-                        if (variant.rulesIn.includes(rule)) {
-                            accept = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (!accept || !this.term.endsWith(variant.kanaIn)) {
-                    continue;
-                }
-
-                const term = this.term.slice(0, -variant.kanaIn.length) + variant.kanaOut;
-                if (term.length === 0) {
-                    continue;
-                }
-
-                const child = new Deinflection(term, {reason, rules: variant.rulesOut});
-                if (await child.deinflect(definer, reasons)) {
-                    this.children.push(child);
-                }
-            }
-        }
-
-        const definitions = await definer(this.term);
-        if (this.rules.length === 0) {
-            this.definitions = definitions;
-        } else {
-            for (const rule of this.rules) {
-                for (const definition of definitions) {
-                    if (definition.rules.includes(rule)) {
-                        this.definitions.push(definition);
-                    }
-                }
-            }
-        }
-
-        if (this.definitions.length > 0 && this.children.length > 0) {
-            const child = new Deinflection(this.term, {rules: this.rules, definitions: this.definitions});
-            this.children.push(child);
-        }
-
-        return this.definitions.length > 0 || this.children.length > 0;
-    }
-
-    gather() {
-        if (this.children.length === 0) {
-            return [{
-                source: this.term,
-                rules: this.rules,
-                definitions: this.definitions,
-                reasons: this.reason.length > 0 ? [this.reason] : []
-            }];
-        }
-
-        const results = [];
-        for (const child of this.children) {
-            for (const result of child.gather()) {
-                if (this.reason.length > 0) {
-                    result.reasons.push(this.reason);
-                }
-
-                result.source = this.term;
-                results.push(result);
-            }
-        }
-
-        return results;
-    }
-}
-
-
 class Deinflector {
     constructor(reasons) {
-        this.reasons = reasons;
+        this.reasons = Deinflector.normalizeReasons(reasons);
     }
 
-    async deinflect(term, definer) {
-        const node = new Deinflection(term);
-        if (await node.deinflect(definer, this.reasons)) {
-            return node.gather();
-        } else {
-            return [];
+    deinflect(source) {
+        const results = [{
+            source,
+            term: source,
+            rules: 0,
+            definitions: [],
+            reasons: []
+        }];
+        for (let i = 0; i < results.length; ++i) {
+            const {rules, term, reasons} = results[i];
+            for (const [reason, variants] of this.reasons) {
+                for (const [kanaIn, kanaOut, rulesIn, rulesOut] of variants) {
+                    if (
+                        (rules !== 0 && (rules & rulesIn) === 0) ||
+                        !term.endsWith(kanaIn) ||
+                        (term.length - kanaIn.length + kanaOut.length) <= 0
+                    ) {
+                        continue;
+                    }
+
+                    results.push({
+                        source,
+                        term: term.slice(0, -kanaIn.length) + kanaOut,
+                        rules: rulesOut,
+                        definitions: [],
+                        reasons: [reason, ...reasons]
+                    });
+                }
+            }
         }
+        return results;
+    }
+
+    static normalizeReasons(reasons) {
+        const normalizedReasons = [];
+        for (const reason in reasons) {
+            const variants = [];
+            for (const {kanaIn, kanaOut, rulesIn, rulesOut} of reasons[reason]) {
+                variants.push([
+                    kanaIn,
+                    kanaOut,
+                    Deinflector.rulesToRuleFlags(rulesIn),
+                    Deinflector.rulesToRuleFlags(rulesOut)
+                ]);
+            }
+            normalizedReasons.push([reason, variants]);
+        }
+        return normalizedReasons;
+    }
+
+    static rulesToRuleFlags(rules) {
+        const ruleTypes = Deinflector.ruleTypes;
+        let value = 0;
+        for (const rule of rules) {
+            value |= ruleTypes[rule];
+        }
+        return value;
     }
 }
+
+Deinflector.ruleTypes = {
+    'v1':    0b0000001, // Verb ichidan
+    'v5':    0b0000010, // Verb godan
+    'vs':    0b0000100, // Verb suru
+    'vk':    0b0001000, // Verb kuru
+    'adj-i': 0b0010000, // Adjective i
+    'iru':   0b0100000, // Intermediate -iru endings for progressive or perfect tense
+};

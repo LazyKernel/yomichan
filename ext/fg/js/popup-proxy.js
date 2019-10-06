@@ -58,16 +58,16 @@ class PopupProxy {
         return await this.invokeHostApi('showOrphaned', {id, elementRect, options});
     }
 
-    async hide() {
+    async hide(changeFocus) {
         if (this.id === null) {
             return;
         }
-        return await this.invokeHostApi('hide', {id: this.id});
+        return await this.invokeHostApi('hide', {id: this.id, changeFocus});
     }
 
-    async setVisible(visible) {
+    async setVisibleOverride(visible) {
         const id = await this.getPopupId();
-        return await this.invokeHostApi('setVisible', {id, visible});
+        return await this.invokeHostApi('setVisibleOverride', {id, visible});
     }
 
     async containsPoint(x, y) {
