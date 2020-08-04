@@ -17,123 +17,54 @@
 
 /* global
  * Display
- * Frontend
- * PopupFactory
+ * FrameEndpoint
  * api
- * dynamicLoader
  */
 
 class DisplayFloat extends Display {
     constructor() {
         super(document.querySelector('#spinner'), document.querySelector('#definitions'));
-        this.autoPlayAudioTimer = null;
-
-        this._secret = yomichan.generateId(16);
-        this._token = null;
-
-        this._orphaned = false;
         this._nestedPopupsPrepared = false;
-
-        this._onKeyDownHandlers = new Map([
-            ['C', (e) => {
-                if (e.ctrlKey && !window.getSelection().toString()) {
-                    this.onSelectionCopy();
-                    return true;
-                }
-                return false;
-            }],
-            ...this._onKeyDownHandlers
-        ]);
-
+        this._ownerFrameId = null;
+        this._frameEndpoint = new FrameEndpoint();
         this._windowMessageHandlers = new Map([
-            ['initialize', {handler: this._initialize.bind(this), authenticate: false}],
-            ['configure', {handler: this._configure.bind(this)}],
-            ['setOptionsContext', {handler: ({optionsContext}) => this.setOptionsContext(optionsContext)}],
-            ['setContent', {handler: ({type, details}) => this.setContent(type, details)}],
-            ['clearAutoPlayTimer', {handler: () => this.clearAutoPlayTimer()}],
-            ['setCustomCss', {handler: ({css}) => this.setCustomCss(css)}],
-            ['setContentScale', {handler: ({scale}) => this.setContentScale(scale)}]
+            ['extensionUnloaded', {async: false, handler: this._onMessageExtensionUnloaded.bind(this)}]
         ]);
+
+        this.registerActions([
+            ['copyHostSelection', () => this._copySelection()]
+        ]);
+        this.registerHotkeys([
+            {key: 'C', modifiers: ['ctrl'], action: 'copyHostSelection'}
+        ]);
+
+        this.autoPlayAudioDelay = 400;
     }
 
     async prepare() {
         await super.prepare();
 
-        yomichan.on('orphaned', this.onOrphaned.bind(this));
-        window.addEventListener('message', this.onMessage.bind(this), false);
+        this.registerMessageHandlers([
+            ['configure',       {async: true,  handler: this._onMessageConfigure.bind(this)}],
+            ['setContentScale', {async: false, handler: this._onMessageSetContentScale.bind(this)}]
+        ]);
+        window.addEventListener('message', this._onWindowMessage.bind(this), false);
+        document.documentElement.addEventListener('mouseup', this._onMouseUp.bind(this), false);
+        document.documentElement.addEventListener('click', this._onClick.bind(this), false);
+        document.documentElement.addEventListener('auxclick', this._onClick.bind(this), false);
 
-        api.broadcastTab('popupPrepared', {secret: this._secret});
-    }
+        this.initializeState();
 
-    onError(error) {
-        if (this._orphaned) {
-            this.setContent('orphaned');
-        } else {
-            yomichan.logError(error);
-        }
-    }
-
-    onOrphaned() {
-        this._orphaned = true;
+        this._frameEndpoint.signal();
     }
 
     onEscape() {
-        window.parent.postMessage('popupClose', '*');
-    }
-
-    onSelectionCopy() {
-        window.parent.postMessage('selectionCopy', '*');
-    }
-
-    onMessage(e) {
-        const data = e.data;
-        if (typeof data !== 'object' || data === null) {
-            this._logMessageError(e, 'Invalid data');
-            return;
-        }
-
-        const action = data.action;
-        if (typeof action !== 'string') {
-            this._logMessageError(e, 'Invalid data');
-            return;
-        }
-
-        const handlerInfo = this._windowMessageHandlers.get(action);
-        if (typeof handlerInfo === 'undefined') {
-            this._logMessageError(e, `Invalid action: ${JSON.stringify(action)}`);
-            return;
-        }
-
-        if (handlerInfo.authenticate !== false && !this._isMessageAuthenticated(data)) {
-            this._logMessageError(e, 'Invalid authentication');
-            return;
-        }
-
-        const handler = handlerInfo.handler;
-        handler(data.params);
-    }
-
-    autoPlayAudio() {
-        this.clearAutoPlayTimer();
-        this.autoPlayAudioTimer = window.setTimeout(() => super.autoPlayAudio(), 400);
-    }
-
-    clearAutoPlayTimer() {
-        if (this.autoPlayAudioTimer) {
-            window.clearTimeout(this.autoPlayAudioTimer);
-            this.autoPlayAudioTimer = null;
-        }
+        this._invoke('closePopup');
     }
 
     async setOptionsContext(optionsContext) {
-        this.optionsContext = optionsContext;
+        super.setOptionsContext(optionsContext);
         await this.updateOptions();
-    }
-
-    setContentScale(scale) {
-        const body = document.body;
-        if (body === null) { return; }
-        body.style.fontSize = `${scale}em`;
     }
 
     async getDocumentTitle() {
@@ -163,25 +94,30 @@ class DisplayFloat extends Display {
         }
     }
 
-    _logMessageError(event, type) {
-        yomichan.logWarning(new Error(`Popup received invalid message from origin ${JSON.stringify(event.origin)}: ${type}`));
+    authenticateMessageData(data) {
+        if (!this._frameEndpoint.authenticate(data)) {
+            throw new Error('Invalid authentication');
+        }
+        return data.data;
     }
 
-    _initialize(params) {
-        if (this._token !== null) { return; } // Already initialized
-        if (!isObject(params)) { return; } // Invalid data
+    // Message handling
 
-        const secret = params.secret;
-        if (secret !== this._secret) { return; } // Invalid authentication
+    _onWindowMessage(e) {
+        const data = e.data;
+        if (!this._frameEndpoint.authenticate(data)) { return; }
 
-        const {token, frameId} = params;
-        this._token = token;
+        const {action, params} = data.data;
+        const messageHandler = this._windowMessageHandlers.get(action);
+        if (typeof messageHandler === 'undefined') { return; }
 
-        api.sendMessageToFrame(frameId, 'popupInitialized', {secret, token});
+        const callback = () => {}; // NOP
+        yomichan.invokeMessageHandler(messageHandler, params, callback);
     }
 
-    async _configure({messageId, frameId, popupId, optionsContext, childrenSupported, scale}) {
-        this.optionsContext = optionsContext;
+    async _onMessageConfigure({frameId, ownerFrameId, popupId, optionsContext, childrenSupported, scale}) {
+        this._ownerFrameId = ownerFrameId;
+        this.setOptionsContext(optionsContext);
 
         await this.updateOptions();
 
@@ -191,24 +127,69 @@ class DisplayFloat extends Display {
             this._nestedPopupsPrepared = true;
         }
 
-        this.setContentScale(scale);
-
-        api.sendMessageToFrame(frameId, 'popupConfigured', {messageId});
+        this._setContentScale(scale);
     }
 
-    _isMessageAuthenticated(message) {
-        return (
-            this._token !== null &&
-            this._token === message.token &&
-            this._secret === message.secret
-        );
+    _onMessageSetContentScale({scale}) {
+        this._setContentScale(scale);
+    }
+
+    _onMessageExtensionUnloaded() {
+        if (yomichan.isExtensionUnloaded) { return; }
+        yomichan.triggerExtensionUnloaded();
+    }
+
+    // Private
+
+    _onMouseUp(e) {
+        switch (e.button) {
+            case 3: // Back
+                if (this._history.hasPrevious()) {
+                    e.preventDefault();
+                }
+                break;
+            case 4: // Forward
+                if (this._history.hasNext()) {
+                    e.preventDefault();
+                }
+                break;
+        }
+    }
+
+    _onClick(e) {
+        switch (e.button) {
+            case 3: // Back
+                if (this._history.hasPrevious()) {
+                    e.preventDefault();
+                    this._history.back();
+                }
+                break;
+            case 4: // Forward
+                if (this._history.hasNext()) {
+                    e.preventDefault();
+                    this._history.forward();
+                }
+                break;
+        }
+    }
+
+    _copySelection() {
+        if (window.getSelection().toString()) { return false; }
+        this._invoke('copySelection');
+        return true;
+    }
+
+    _setContentScale(scale) {
+        const body = document.body;
+        if (body === null) { return; }
+        body.style.fontSize = `${scale}em`;
     }
 
     async _prepareNestedPopups(id, depth, parentFrameId, url) {
         let complete = false;
 
         const onOptionsUpdated = async () => {
-            const optionsContext = this.optionsContext;
+            const optionsContext = this.getOptionsContext();
             const options = await api.optionsGet(optionsContext);
             const maxPopupDepthExceeded = !(typeof depth === 'number' && depth < options.scanning.popupNestingMaxDepth);
             if (maxPopupDepthExceeded || complete) { return; }
@@ -217,7 +198,13 @@ class DisplayFloat extends Display {
             yomichan.off('optionsUpdated', onOptionsUpdated);
 
             try {
-                await this._setupNestedPopups(id, depth, parentFrameId, url);
+                await this.setupNestedPopups({
+                    id,
+                    depth,
+                    parentFrameId,
+                    url,
+                    proxy: true
+                });
             } catch (e) {
                 yomichan.logError(e);
             }
@@ -228,32 +215,7 @@ class DisplayFloat extends Display {
         await onOptionsUpdated();
     }
 
-    async _setupNestedPopups(id, depth, parentFrameId, url) {
-        await dynamicLoader.loadScripts([
-            '/mixed/js/text-scanner.js',
-            '/fg/js/popup.js',
-            '/fg/js/popup-proxy.js',
-            '/fg/js/popup-factory.js',
-            '/fg/js/frame-offset-forwarder.js',
-            '/fg/js/frontend.js'
-        ]);
-
-        const {frameId} = await api.frameInformationGet();
-
-        const popupFactory = new PopupFactory(frameId);
-        popupFactory.prepare();
-
-        const frontend = new Frontend(
-            frameId,
-            popupFactory,
-            {
-                id,
-                depth,
-                parentFrameId,
-                url,
-                proxy: true
-            }
-        );
-        await frontend.prepare();
+    _invoke(action, params={}) {
+        return api.crossFrame.invoke(this._ownerFrameId, action, params);
     }
 }

@@ -217,6 +217,12 @@ h2 {
     display: none;
 }
 
+:root[data-yomichan-page=float] #query-parser-container {
+    padding-left: 0.72em;
+    padding-right: 0.72em;
+    border-bottom: 0.07142857142857142em solid var(--light-border-color); /* 14px => 1px */
+}
+
 
 /*
  * Entries
@@ -305,6 +311,7 @@ button.action-button {
     border-bottom: 0.03571428em dashed var(--dark-border-color); /* 28px => 1px */
     color: var(--default-text-color);
     text-decoration: none;
+    cursor: pointer;
 }
 
 .term-expression[data-frequency=popular]>.term-expression-text,

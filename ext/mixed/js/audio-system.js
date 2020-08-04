@@ -66,10 +66,11 @@ class TextToSpeechAudio {
 }
 
 class AudioSystem {
-    constructor({audioUriBuilder, useCache}) {
+    constructor({audioUriBuilder, requestBuilder=null, useCache}) {
         this._cache = useCache ? new Map() : null;
         this._cacheSizeMaximum = 32;
         this._audioUriBuilder = audioUriBuilder;
+        this._requestBuilder = requestBuilder;
 
         if (typeof speechSynthesis !== 'undefined') {
             // speechSynthesis.getVoices() will not be populated unless some API call is made.
@@ -170,9 +171,9 @@ class AudioSystem {
     }
 
     async _createAudioBinaryFromUrl(url) {
-        const response = await fetch(url, {
+        const response = await this._requestBuilder.fetchAnonymous(url, {
             method: 'GET',
-            mode: 'no-cors',
+            mode: 'cors',
             cache: 'default',
             credentials: 'omit',
             redirect: 'follow',

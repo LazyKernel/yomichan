@@ -25,6 +25,7 @@ class TemplateRenderer {
         this._cache = new Map();
         this._cacheMaxSize = 5;
         this._helpersRegistered = false;
+        this._stateStack = null;
     }
 
     async render(template, data) {
@@ -41,7 +42,12 @@ class TemplateRenderer {
             cache.set(template, instance);
         }
 
-        return instance(data).trim();
+        try {
+            this._stateStack = [new Map()];
+            return instance(data).trim();
+        } finally {
+            this._stateStack = null;
+        }
     }
 
     // Private
@@ -69,7 +75,17 @@ class TemplateRenderer {
             ['sanitizeCssClass', this._sanitizeCssClass.bind(this)],
             ['regexReplace',     this._regexReplace.bind(this)],
             ['regexMatch',       this._regexMatch.bind(this)],
-            ['mergeTags',        this._mergeTags.bind(this)]
+            ['mergeTags',        this._mergeTags.bind(this)],
+            ['eachUpTo',         this._eachUpTo.bind(this)],
+            ['spread',           this._spread.bind(this)],
+            ['op',               this._op.bind(this)],
+            ['get',              this._get.bind(this)],
+            ['set',              this._set.bind(this)],
+            ['scope',            this._scope.bind(this)],
+            ['property',         this._property.bind(this)],
+            ['noop',             this._noop.bind(this)],
+            ['isMoraPitchHigh',  this._isMoraPitchHigh.bind(this)],
+            ['getKanaMorae',     this._getKanaMorae.bind(this)]
         ];
 
         for (const [name, helper] of helpers) {
@@ -205,5 +221,155 @@ class TemplateRenderer {
         }
 
         return [...tags].join(', ');
+    }
+
+    _eachUpTo(context, iterable, maxCount, options) {
+        if (iterable) {
+            const results = [];
+            let any = false;
+            for (const entry of iterable) {
+                any = true;
+                if (results.length >= maxCount) { break; }
+                const processedEntry = options.fn(entry);
+                results.push(processedEntry);
+            }
+            if (any) {
+                return results.join('');
+            }
+        }
+        return options.inverse(context);
+    }
+
+    _spread(context, ...args) {
+        const result = [];
+        for (let i = 0, ii = args.length - 1; i < ii; ++i) {
+            try {
+                result.push(...args[i]);
+            } catch (e) {
+                // NOP
+            }
+        }
+        return result;
+    }
+
+    _op(context, ...args) {
+        switch (args.length) {
+            case 3: return this._evaluateUnaryExpression(args[0], args[1]);
+            case 4: return this._evaluateBinaryExpression(args[0], args[1], args[2]);
+            case 5: return this._evaluateTernaryExpression(args[0], args[1], args[2], args[3]);
+            default: return void 0;
+        }
+    }
+
+    _evaluateUnaryExpression(operator, operand1) {
+        switch (operator) {
+            case '+': return +operand1;
+            case '-': return -operand1;
+            case '~': return ~operand1;
+            case '!': return !operand1;
+            default: return void 0;
+        }
+    }
+
+    _evaluateBinaryExpression(operator, operand1, operand2) {
+        switch (operator) {
+            case '+': return operand1 + operand2;
+            case '-': return operand1 - operand2;
+            case '/': return operand1 / operand2;
+            case '*': return operand1 * operand2;
+            case '%': return operand1 % operand2;
+            case '**': return operand1 ** operand2;
+            case '==': return operand1 == operand2; // eslint-disable-line eqeqeq
+            case '!=': return operand1 != operand2; // eslint-disable-line eqeqeq
+            case '===': return operand1 === operand2;
+            case '!==': return operand1 !== operand2;
+            case '<':  return operand1 < operand2;
+            case '<=': return operand1 <= operand2;
+            case '>':  return operand1 > operand2;
+            case '>=': return operand1 >= operand2;
+            case '<<': return operand1 << operand2;
+            case '>>': return operand1 >> operand2;
+            case '>>>': return operand1 >>> operand2;
+            case '&': return operand1 & operand2;
+            case '|': return operand1 | operand2;
+            case '^': return operand1 ^ operand2;
+            case '&&': return operand1 && operand2;
+            case '||': return operand1 || operand2;
+            default: return void 0;
+        }
+    }
+
+    _evaluateTernaryExpression(operator, operand1, operand2, operand3) {
+        switch (operator) {
+            case '?:': return operand1 ? operand2 : operand3;
+            default: return void 0;
+        }
+    }
+
+    _get(context, key) {
+        for (let i = this._stateStack.length; --i >= 0;) {
+            const map = this._stateStack[i];
+            if (map.has(key)) {
+                return map.get(key);
+            }
+        }
+        return void 0;
+    }
+
+    _set(context, ...args) {
+        switch (args.length) {
+            case 2:
+                {
+                    const [key, options] = args;
+                    const value = options.fn(context);
+                    this._stateStack[this._stateStack.length - 1].set(key, value);
+                }
+                break;
+            case 3:
+                {
+                    const [key, value] = args;
+                    this._stateStack[this._stateStack.length - 1].set(key, value);
+                }
+                break;
+        }
+        return '';
+    }
+
+    _scope(context, options) {
+        try {
+            this._stateStack.push(new Map());
+            return options.fn(context);
+        } finally {
+            if (this._stateStack.length > 1) {
+                this._stateStack.pop();
+            }
+        }
+    }
+
+    _property(context, ...args) {
+        const ii = args.length - 1;
+        if (ii <= 0) { return void 0; }
+
+        try {
+            let value = args[0];
+            for (let i = 1; i < ii; ++i) {
+                value = value[args[i]];
+            }
+            return value;
+        } catch (e) {
+            return void 0;
+        }
+    }
+
+    _noop(context, options) {
+        return options.fn(context);
+    }
+
+    _isMoraPitchHigh(context, index, position) {
+        return jp.isMoraPitchHigh(index, position);
+    }
+
+    _getKanaMorae(context, text) {
+        return jp.getKanaMorae(`${text}`);
     }
 }

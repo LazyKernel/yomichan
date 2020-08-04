@@ -90,7 +90,7 @@ class JsonSchemaProxyHandler {
             throw new Error(`Property ${property} not supported`);
         }
 
-        value = JsonSchema.isolate(value);
+        value = JsonSchema.clone(value);
 
         JsonSchemaProxyHandler.validate(value, propertySchema, new JsonSchemaTraversalInfo(value, propertySchema));
 
@@ -139,7 +139,7 @@ class JsonSchemaProxyHandler {
                     if (path !== null) { path.push(['additionalProperties', additionalProperties]); }
                     return additionalProperties;
                 } else {
-                    const result = JsonSchemaProxyHandler._unconstrainedSchema;
+                    const result = JsonSchemaProxyHandler.unconstrainedSchema;
                     if (path !== null) { path.push([null, result]); }
                     return result;
                 }
@@ -167,7 +167,7 @@ class JsonSchemaProxyHandler {
                     if (path !== null) { path.push(['additionalItems', additionalItems]); }
                     return additionalItems;
                 } else {
-                    const result = JsonSchemaProxyHandler._unconstrainedSchema;
+                    const result = JsonSchemaProxyHandler.unconstrainedSchema;
                     if (path !== null) { path.push([null, result]); }
                     return result;
                 }
@@ -515,7 +515,7 @@ class JsonSchemaProxyHandler {
 
             const schemaDefault = schema.default;
             if (typeof schemaDefault !== 'undefined') {
-                value = JsonSchema.isolate(schemaDefault);
+                value = JsonSchema.clone(schemaDefault);
                 type = JsonSchemaProxyHandler.getValueType(value);
                 assignDefault = !JsonSchemaProxyHandler.isValueTypeAny(value, type, schemaType);
             }
@@ -579,7 +579,12 @@ class JsonSchemaProxyHandler {
     }
 }
 
-JsonSchemaProxyHandler._unconstrainedSchema = {};
+Object.defineProperty(JsonSchemaProxyHandler, 'unconstrainedSchema', {
+    value: Object.freeze({}),
+    configurable: false,
+    enumerable: true,
+    writable: false
+});
 
 class JsonSchemaTraversalInfo {
     constructor(value, schema) {
@@ -628,19 +633,7 @@ class JsonSchema {
         return JsonSchemaProxyHandler.getValidValueOrDefault(schema, value);
     }
 
-    static isolate(value) {
-        if (value === null) { return null; }
-
-        switch (typeof value) {
-            case 'boolean':
-            case 'number':
-            case 'string':
-            case 'bigint':
-            case 'symbol':
-                return value;
-        }
-
-        const stringValue = JSON.stringify(value);
-        return typeof stringValue === 'string' ? JSON.parse(stringValue) : null;
+    static clone(value) {
+        return clone(value);
     }
 }

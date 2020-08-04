@@ -20,17 +20,19 @@
  */
 
 class PopupProxy extends EventDispatcher {
-    constructor(id, depth, parentPopupId, parentFrameId, frameOffsetForwarder=null) {
+    constructor(id, depth, parentPopupId, parentFrameId, ownerFrameId, frameOffsetForwarder=null) {
         super();
         this._id = id;
         this._depth = depth;
         this._parentPopupId = parentPopupId;
         this._parentFrameId = parentFrameId;
+        this._ownerFrameId = ownerFrameId;
         this._frameOffsetForwarder = frameOffsetForwarder;
 
         this._frameOffset = null;
         this._frameOffsetPromise = null;
         this._frameOffsetUpdatedAt = null;
+        this._frameOffsetExpireTimeout = 1000;
     }
 
     // Public properties
@@ -50,7 +52,7 @@ class PopupProxy extends EventDispatcher {
     // Public functions
 
     async prepare() {
-        const {id} = await this._invoke('getOrCreatePopup', {id: this._id, parentId: this._parentPopupId});
+        const {id} = await this._invoke('getOrCreatePopup', {id: this._id, parentId: this._parentPopupId, ownerFrameId: this._ownerFrameId});
         this._id = id;
     }
 
@@ -58,20 +60,20 @@ class PopupProxy extends EventDispatcher {
         return true;
     }
 
-    async setOptionsContext(optionsContext, source) {
-        return await this._invoke('setOptionsContext', {id: this._id, optionsContext, source});
+    setOptionsContext(optionsContext, source) {
+        return this._invokeSafe('setOptionsContext', {id: this._id, optionsContext, source});
     }
 
     hide(changeFocus) {
-        this._invoke('hide', {id: this._id, changeFocus});
+        return this._invokeSafe('hide', {id: this._id, changeFocus});
     }
 
-    async isVisible() {
-        return await this._invoke('isVisible', {id: this._id});
+    isVisible() {
+        return this._invokeSafe('isVisible', {id: this._id}, false);
     }
 
     setVisibleOverride(visible) {
-        this._invoke('setVisibleOverride', {id: this._id, visible});
+        return this._invokeSafe('setVisibleOverride', {id: this._id, visible});
     }
 
     async containsPoint(x, y) {
@@ -79,29 +81,32 @@ class PopupProxy extends EventDispatcher {
             await this._updateFrameOffset();
             [x, y] = this._applyFrameOffset(x, y);
         }
-        return await this._invoke('containsPoint', {id: this._id, x, y});
+        return await this._invokeSafe('containsPoint', {id: this._id, x, y}, false);
     }
 
-    async showContent(elementRect, writingMode, type, details, context) {
-        let {x, y, width, height} = elementRect;
-        if (this._frameOffsetForwarder !== null) {
-            await this._updateFrameOffset();
-            [x, y] = this._applyFrameOffset(x, y);
+    async showContent(details, displayDetails) {
+        const {elementRect} = details;
+        if (typeof elementRect !== 'undefined') {
+            let {x, y, width, height} = elementRect;
+            if (this._frameOffsetForwarder !== null) {
+                await this._updateFrameOffset();
+                [x, y] = this._applyFrameOffset(x, y);
+            }
+            details.elementRect = {x, y, width, height};
         }
-        elementRect = {x, y, width, height};
-        return await this._invoke('showContent', {id: this._id, elementRect, writingMode, type, details, context});
+        return await this._invokeSafe('showContent', {id: this._id, details, displayDetails});
     }
 
     setCustomCss(css) {
-        this._invoke('setCustomCss', {id: this._id, css});
+        return this._invokeSafe('setCustomCss', {id: this._id, css});
     }
 
     clearAutoPlayTimer() {
-        this._invoke('clearAutoPlayTimer', {id: this._id});
+        return this._invokeSafe('clearAutoPlayTimer', {id: this._id});
     }
 
     setContentScale(scale) {
-        this._invoke('setContentScale', {id: this._id, scale});
+        return this._invokeSafe('setContentScale', {id: this._id, scale});
     }
 
     // Private
@@ -110,10 +115,19 @@ class PopupProxy extends EventDispatcher {
         return api.crossFrame.invoke(this._parentFrameId, action, params);
     }
 
+    async _invokeSafe(action, params={}, defaultReturnValue) {
+        try {
+            return await this._invoke(action, params);
+        } catch (e) {
+            if (!yomichan.isExtensionUnloaded) { throw e; }
+            return defaultReturnValue;
+        }
+    }
+
     async _updateFrameOffset() {
         const now = Date.now();
         const firstRun = this._frameOffsetUpdatedAt === null;
-        const expired = firstRun || this._frameOffsetUpdatedAt < now - PopupProxy._frameOffsetExpireTimeout;
+        const expired = firstRun || this._frameOffsetUpdatedAt < now - this._frameOffsetExpireTimeout;
         if (this._frameOffsetPromise === null && !expired) { return; }
 
         if (this._frameOffsetPromise !== null) {
@@ -151,5 +165,3 @@ class PopupProxy extends EventDispatcher {
         return [x + offsetX, y + offsetY];
     }
 }
-
-PopupProxy._frameOffsetExpireTimeout = 1000;

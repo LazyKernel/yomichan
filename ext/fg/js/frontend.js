@@ -20,6 +20,7 @@
  * FrameOffsetForwarder
  * PopupProxy
  * TextScanner
+ * TextSourceElement
  * api
  * docSentenceExtract
  */
@@ -32,9 +33,7 @@ class Frontend {
         this._options = null;
         this._pageZoomFactor = 1.0;
         this._contentScale = 1.0;
-        this._orphaned = false;
         this._lastShowPromise = Promise.resolve();
-        this._enabledEventListeners = new EventListenerCollection();
         this._activeModifiers = new Set();
         this._optionsUpdatePending = false;
         this._textScanner = new TextScanner({
@@ -58,21 +57,16 @@ class Frontend {
         this._isSearchPage = isSearchPage;
         this._depth = depth;
         this._frameId = frameId;
-        this._frameOffsetForwarder = new FrameOffsetForwarder();
+        this._frameOffsetForwarder = new FrameOffsetForwarder(frameId);
         this._popupFactory = popupFactory;
         this._allowRootFramePopupProxy = allowRootFramePopupProxy;
         this._popupCache = new Map();
         this._updatePopupToken = null;
 
-        this._windowMessageHandlers = new Map([
-            ['popupClose', this._onMessagePopupClose.bind(this)],
-            ['selectionCopy', this._onMessageSelectionCopy.bind()]
-        ]);
-
         this._runtimeMessageHandlers = new Map([
-            ['popupSetVisibleOverride', this._onMessagePopupSetVisibleOverride.bind(this)],
-            ['rootPopupRequestInformationBroadcast', this._onMessageRootPopupRequestInformationBroadcast.bind(this)],
-            ['requestDocumentInformationBroadcast', this._onMessageRequestDocumentInformationBroadcast.bind(this)]
+            ['popupSetVisibleOverride',              {async: false, handler: this._onMessagePopupSetVisibleOverride.bind(this)}],
+            ['rootPopupRequestInformationBroadcast', {async: false, handler: this._onMessageRootPopupRequestInformationBroadcast.bind(this)}],
+            ['requestDocumentInformationBroadcast',  {async: false, handler: this._onMessageRequestDocumentInformationBroadcast.bind(this)}]
         ]);
     }
 
@@ -110,16 +104,18 @@ class Frontend {
             visualViewport.addEventListener('resize', this._onVisualViewportResize.bind(this));
         }
 
-        yomichan.on('orphaned', this._onOrphaned.bind(this));
         yomichan.on('optionsUpdated', this.updateOptions.bind(this));
         yomichan.on('zoomChanged', this._onZoomChanged.bind(this));
+        yomichan.on('closePopups', this._onApiClosePopup.bind(this));
         chrome.runtime.onMessage.addListener(this._onRuntimeMessage.bind(this));
 
         this._textScanner.on('clearSelection', this._onClearSelection.bind(this));
         this._textScanner.on('activeModifiersChanged', this._onActiveModifiersChanged.bind(this));
 
         api.crossFrame.registerHandlers([
-            ['getUrl', {async: false, handler: this._onApiGetUrl.bind(this)}]
+            ['getUrl',        {async: false, handler: this._onApiGetUrl.bind(this)}],
+            ['closePopup',    {async: false, handler: this._onApiClosePopup.bind(this)}],
+            ['copySelection', {async: false, handler: this._onApiCopySelection.bind(this)}]
         ]);
 
         this._updateContentScale();
@@ -152,26 +148,13 @@ class Frontend {
     }
 
     async updateOptions() {
-        const optionsContext = await this.getOptionsContext();
-        this._options = await api.optionsGet(optionsContext);
-
-        await this._updatePopup();
-
-        this._textScanner.setOptions(this._options);
-        this._updateTextScannerEnabled();
-
-        const ignoreNodes = ['.scan-disable', '.scan-disable *'];
-        if (!this._options.scanning.enableOnPopupExpressions) {
-            ignoreNodes.push('.source-text', '.source-text *');
-        }
-        this._textScanner.ignoreNodes = ignoreNodes.join(',');
-
-        this._updateContentScale();
-
-        const textSourceCurrent = this._textScanner.getCurrentTextSource();
-        const causeCurrent = this._textScanner.causeCurrent;
-        if (textSourceCurrent !== null && causeCurrent !== null) {
-            await this._search(textSourceCurrent, causeCurrent);
+        try {
+            await this._updateOptionsInternal();
+        } catch (e) {
+            if (!yomichan.isExtensionUnloaded) {
+                throw e;
+            }
+            this._showExtensionUnloaded(null);
         }
     }
 
@@ -180,14 +163,6 @@ class Frontend {
     }
 
     // Message handlers
-
-    _onMessagePopupClose() {
-        this._textScanner.clearSelection(false);
-    }
-
-    _onMessageSelectionCopy() {
-        document.execCommand('copy');
-    }
 
     _onMessagePopupSetVisibleOverride({visible}) {
         this._popup.setVisibleOverride(visible);
@@ -207,31 +182,24 @@ class Frontend {
         return window.location.href;
     }
 
+    _onApiClosePopup() {
+        this._textScanner.clearSelection(false);
+    }
+
+    _onApiCopySelection() {
+        document.execCommand('copy');
+    }
+
     // Private
 
     _onResize() {
         this._updatePopupPosition();
     }
 
-    _onWindowMessage(e) {
-        const action = e.data;
-        const handler = this._windowMessageHandlers.get(action);
-        if (typeof handler !== 'function') { return false; }
-
-        handler();
-    }
-
     _onRuntimeMessage({action, params}, sender, callback) {
-        const handler = this._runtimeMessageHandlers.get(action);
-        if (typeof handler !== 'function') { return false; }
-
-        const result = handler(params, sender);
-        callback(result);
-        return false;
-    }
-
-    _onOrphaned() {
-        this._orphaned = true;
+        const messageHandler = this._runtimeMessageHandlers.get(action);
+        if (typeof messageHandler === 'undefined') { return false; }
+        return yomichan.invokeMessageHandler(messageHandler, params, callback, sender);
     }
 
     _onZoomChanged({newZoomFactor}) {
@@ -261,6 +229,30 @@ class Frontend {
             return;
         }
         await this.updateOptions();
+    }
+
+    async _updateOptionsInternal() {
+        const optionsContext = await this.getOptionsContext();
+        this._options = await api.optionsGet(optionsContext);
+
+        await this._updatePopup();
+
+        this._textScanner.setOptions(this._options);
+        this._updateTextScannerEnabled();
+
+        const ignoreNodes = ['.scan-disable', '.scan-disable *'];
+        if (!this._options.scanning.enableOnPopupExpressions) {
+            ignoreNodes.push('.source-text', '.source-text *');
+        }
+        this._textScanner.ignoreNodes = ignoreNodes.join(',');
+
+        this._updateContentScale();
+
+        const textSourceCurrent = this._textScanner.getCurrentTextSource();
+        const causeCurrent = this._textScanner.causeCurrent;
+        if (textSourceCurrent !== null && causeCurrent !== null) {
+            await this._search(textSourceCurrent, causeCurrent);
+        }
     }
 
     async _updatePopup() {
@@ -313,11 +305,11 @@ class Frontend {
     }
 
     async _getDefaultPopup() {
-        return this._popupFactory.getOrCreatePopup(null, null, this._depth);
+        return this._popupFactory.getOrCreatePopup({depth: this._depth, ownerFrameId: this._frameId});
     }
 
     async _getProxyPopup() {
-        const popup = new PopupProxy(null, this._depth + 1, this._proxyPopupId, this._parentFrameId);
+        const popup = new PopupProxy(null, this._depth + 1, this._proxyPopupId, this._parentFrameId, this._frameId);
         await popup.prepare();
         return popup;
     }
@@ -334,7 +326,7 @@ class Frontend {
         api.broadcastTab('rootPopupRequestInformationBroadcast');
         const {popupId, frameId: parentFrameId} = await rootPopupInformationPromise;
 
-        const popup = new PopupProxy(popupId, 0, null, parentFrameId, this._frameOffsetForwarder);
+        const popup = new PopupProxy(popupId, 0, null, parentFrameId, this._frameId, this._frameOffsetForwarder);
         popup.on('offsetNotFound', () => {
             this._allowRootFramePopupProxy = false;
             this._updatePopup();
@@ -348,8 +340,15 @@ class Frontend {
         return this._popup === null || this._popup.isProxy() ? [] : [this._popup.getContainer()];
     }
 
-    _ignorePoint(x, y) {
-        return this._popup !== null && this._popup.containsPoint(x, y);
+    async _ignorePoint(x, y) {
+        try {
+            return this._popup !== null && await this._popup.containsPoint(x, y);
+        } catch (e) {
+            if (!yomichan.isExtensionUnloaded) {
+                throw e;
+            }
+            return false;
+        }
     }
 
     async _search(textSource, cause) {
@@ -370,9 +369,9 @@ class Frontend {
                 }
             }
         } catch (e) {
-            if (this._orphaned) {
+            if (yomichan.isExtensionUnloaded) {
                 if (textSource !== null && this._options.scanning.modifier !== 'none') {
-                    this._showPopupContent(textSource, await this.getOptionsContext(), 'orphaned');
+                    this._showExtensionUnloaded(textSource);
                 }
             } else {
                 yomichan.logError(e);
@@ -412,28 +411,58 @@ class Frontend {
         return {definitions, type: 'kanji'};
     }
 
+    async _showExtensionUnloaded(textSource) {
+        if (textSource === null) {
+            textSource = this._textScanner.getCurrentTextSource();
+            if (textSource === null) { return; }
+        }
+        this._showPopupContent(textSource, await this.getOptionsContext());
+    }
+
     _showContent(textSource, focus, definitions, type, optionsContext) {
         const {url} = optionsContext;
         const sentenceExtent = this._options.anki.sentenceExt;
         const layoutAwareScan = this._options.scanning.layoutAwareScan;
         const sentence = docSentenceExtract(textSource, sentenceExtent, layoutAwareScan);
-        this._showPopupContent(
-            textSource,
-            optionsContext,
-            type,
-            {definitions, context: {sentence, url, focus, disableHistory: true}}
-        );
+        const query = textSource.text();
+        const details = {
+            focus,
+            history: false,
+            params: {
+                type,
+                query,
+                wildcards: 'off'
+            },
+            state: {
+                focusEntry: 0,
+                sentence,
+                url
+            },
+            content: {
+                definitions
+            }
+        };
+        if (textSource instanceof TextSourceElement && textSource.fullContent !== query) {
+            details.params.full = textSource.fullContent;
+            details.params['full-visible'] = 'true';
+        }
+        this._showPopupContent(textSource, optionsContext, details);
     }
 
-    _showPopupContent(textSource, optionsContext, type=null, details=null) {
-        const context = {optionsContext, source: this._id};
+    _showPopupContent(textSource, optionsContext, details=null) {
         this._lastShowPromise = this._popup.showContent(
-            textSource.getRect(),
-            textSource.getWritingMode(),
-            type,
-            details,
-            context
+            {
+                source: this._id,
+                optionsContext,
+                elementRect: textSource.getRect(),
+                writingMode: textSource.getWritingMode()
+            },
+            details
         );
+        this._lastShowPromise.catch((error) => {
+            if (yomichan.isExtensionUnloaded) { return; }
+            yomichan.logError(error);
+        });
         return this._lastShowPromise;
     }
 
@@ -450,11 +479,7 @@ class Frontend {
             this._depth <= this._options.scanning.popupNestingMaxDepth &&
             !this._disabledOverride
         );
-        this._enabledEventListeners.removeAllEventListeners();
         this._textScanner.setEnabled(enabled);
-        if (enabled) {
-            this._enabledEventListeners.addEventListener(window, 'message', this._onWindowMessage.bind(this));
-        }
     }
 
     _updateContentScale() {

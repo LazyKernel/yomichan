@@ -1,7 +1,7 @@
 {
     "manifest_version": 2,
     "name": "Yomichan (development build)",
-    "version": "20.6.27.2",
+    "version": "20.8.3.0",
 
     "description": "Japanese dictionary with Anki integration. This is a development build; get the stable version here: https://tinyurl.com/yaatdjmp",
     "icons": {
@@ -36,10 +36,12 @@
         "matches": ["http://*/*", "https://*/*", "file://*/*"],
         "js": [
             "mixed/js/core.js",
+            "mixed/js/yomichan.js",
             "mixed/js/comm.js",
             "mixed/js/dom.js",
             "mixed/js/api.js",
             "mixed/js/dynamic-loader.js",
+            "mixed/js/frame-client.js",
             "mixed/js/text-scanner.js",
             "fg/js/document.js",
             "fg/js/dom-text-scanner.js",
@@ -65,7 +67,9 @@
         "storage",
         "clipboardWrite",
         "unlimitedStorage",
-        "nativeMessaging"
+        "nativeMessaging",
+        "webRequest",
+        "webRequestBlocking"
     ],
     "optional_permissions": [
         "clipboardRead"
@@ -89,7 +93,7 @@
     "applications": {
         "gecko": {
             "id": "alex.testing@foosoft.net",
-            "strict_min_version": "52.0"
+            "strict_min_version": "55.0"
         }
     }
 }

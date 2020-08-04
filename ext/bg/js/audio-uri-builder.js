@@ -20,7 +20,8 @@
  */
 
 class AudioUriBuilder {
-    constructor() {
+    constructor({requestBuilder}) {
+        this._requestBuilder = requestBuilder;
         this._getUrlHandlers = new Map([
             ['jpod101', this._getUriJpod101.bind(this)],
             ['jpod101-alternate', this._getUriJpod101Alternate.bind(this)],
@@ -83,10 +84,10 @@ class AudioUriBuilder {
 
     async _getUriJpod101Alternate(definition) {
         const fetchUrl = 'https://www.japanesepod101.com/learningcenter/reference/dictionary_post';
-        const data = `post=dictionary_reference&match_type=exact&search_query=${encodeURIComponent(definition.expression)}`;
-        const response = await fetch(fetchUrl, {
+        const data = `post=dictionary_reference&match_type=exact&search_query=${encodeURIComponent(definition.expression)}&vulgar=true`;
+        const response = await this._requestBuilder.fetchAnonymous(fetchUrl, {
             method: 'POST',
-            mode: 'no-cors',
+            mode: 'cors',
             cache: 'default',
             credentials: 'omit',
             redirect: 'follow',
@@ -116,9 +117,9 @@ class AudioUriBuilder {
 
     async _getUriJisho(definition) {
         const fetchUrl = `https://jisho.org/search/${definition.expression}`;
-        const response = await fetch(fetchUrl, {
+        const response = await this._requestBuilder.fetchAnonymous(fetchUrl, {
             method: 'GET',
-            mode: 'no-cors',
+            mode: 'cors',
             cache: 'default',
             credentials: 'omit',
             redirect: 'follow',

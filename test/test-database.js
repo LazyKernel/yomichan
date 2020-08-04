@@ -30,7 +30,7 @@ const chrome = {
             removeListener() { /* NOP */ }
         },
         getURL(path2) {
-            return url.pathToFileURL(path.join(__dirname, '..', 'ext', path2.replace(/^\//, '')));
+            return url.pathToFileURL(path.join(__dirname, '..', 'ext', path2.replace(/^\//, ''))).href;
         },
         sendMessage() {
             // NOP
@@ -89,6 +89,9 @@ async function fetch(url2) {
     await Promise.resolve();
     const content = fs.readFileSync(filePath, {encoding: null});
     return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
         text: async () => Promise.resolve(content.toString('utf8')),
         json: async () => Promise.resolve(JSON.parse(content.toString('utf8')))
     };
@@ -109,17 +112,16 @@ const vm = new VM({
 vm.context.window = vm.context;
 
 vm.execute([
+    'mixed/js/core.js',
     'bg/js/json-schema.js',
     'bg/js/dictionary.js',
-    'mixed/js/core.js',
     'bg/js/media-utility.js',
-    'bg/js/request.js',
     'bg/js/dictionary-importer.js',
-    'bg/js/generic-database.js',
-    'bg/js/database.js'
+    'bg/js/database.js',
+    'bg/js/dictionary-database.js'
 ]);
 const DictionaryImporter = vm.get('DictionaryImporter');
-const Database = vm.get('Database');
+const DictionaryDatabase = vm.get('DictionaryDatabase');
 
 
 function countTermsWithExpression(terms, expression) {
@@ -180,15 +182,15 @@ async function testDatabase1() {
         {
             cleanup: async () => {
                 // Test purge
-                await database.purge();
-                await testDatabaseEmpty1(database);
+                await dictionaryDatabase.purge();
+                await testDatabaseEmpty1(dictionaryDatabase);
             }
         },
         {
             cleanup: async () => {
                 // Test deleteDictionary
                 let progressEvent = false;
-                await database.deleteDictionary(
+                await dictionaryDatabase.deleteDictionary(
                     title,
                     {rate: 1000},
                     () => {
@@ -197,7 +199,7 @@ async function testDatabase1() {
                 );
                 assert.ok(progressEvent);
 
-                await testDatabaseEmpty1(database);
+                await testDatabaseEmpty1(dictionaryDatabase);
             }
         },
         {
@@ -207,8 +209,8 @@ async function testDatabase1() {
 
     // Setup database
     const dictionaryImporter = new DictionaryImporter();
-    const database = new Database();
-    await database.prepare();
+    const dictionaryDatabase = new DictionaryDatabase();
+    await dictionaryDatabase.prepare();
 
     for (const {cleanup} of iterations) {
         const expectedSummary = {
@@ -221,8 +223,8 @@ async function testDatabase1() {
 
         // Import data
         let progressEvent = false;
-        const {result, errors} = await dictionaryImporter.import(
-            database,
+        const {result, errors} = await dictionaryImporter.importDictionary(
+            dictionaryDatabase,
             testDictionarySource,
             {prefixWildcardsSupported: true},
             () => {
@@ -234,11 +236,11 @@ async function testDatabase1() {
         assert.ok(progressEvent);
 
         // Get info summary
-        const info = await database.getDictionaryInfo();
+        const info = await dictionaryDatabase.getDictionaryInfo();
         vm.assert.deepStrictEqual(info, [expectedSummary]);
 
         // Get counts
-        const counts = await database.getDictionaryCounts(
+        const counts = await dictionaryDatabase.getDictionaryCounts(
             info.map((v) => v.title),
             true
         );
@@ -248,19 +250,19 @@ async function testDatabase1() {
         });
 
         // Test find* functions
-        await testFindTermsBulkTest1(database, titles);
-        await testTindTermsExactBulk1(database, titles);
-        await testFindTermsBySequenceBulk1(database, title);
-        await testFindTermMetaBulk1(database, titles);
-        await testFindKanjiBulk1(database, titles);
-        await testFindKanjiMetaBulk1(database, titles);
-        await testFindTagForTitle1(database, title);
+        await testFindTermsBulkTest1(dictionaryDatabase, titles);
+        await testTindTermsExactBulk1(dictionaryDatabase, titles);
+        await testFindTermsBySequenceBulk1(dictionaryDatabase, title);
+        await testFindTermMetaBulk1(dictionaryDatabase, titles);
+        await testFindKanjiBulk1(dictionaryDatabase, titles);
+        await testFindKanjiMetaBulk1(dictionaryDatabase, titles);
+        await testFindTagForTitle1(dictionaryDatabase, title);
 
         // Cleanup
         await cleanup();
     }
 
-    await database.close();
+    await dictionaryDatabase.close();
 }
 
 async function testDatabaseEmpty1(database) {
@@ -861,33 +863,33 @@ async function testDatabase2() {
 
     // Setup database
     const dictionaryImporter = new DictionaryImporter();
-    const database = new Database();
+    const dictionaryDatabase = new DictionaryDatabase();
 
     // Error: not prepared
-    await assert.rejects(async () => await database.deleteDictionary(title, {rate: 1000}, () => {}));
-    await assert.rejects(async () => await database.findTermsBulk(['?'], titles, null));
-    await assert.rejects(async () => await database.findTermsExactBulk(['?'], ['?'], titles));
-    await assert.rejects(async () => await database.findTermsBySequenceBulk([1], title));
-    await assert.rejects(async () => await database.findTermMetaBulk(['?'], titles));
-    await assert.rejects(async () => await database.findTermMetaBulk(['?'], titles));
-    await assert.rejects(async () => await database.findKanjiBulk(['?'], titles));
-    await assert.rejects(async () => await database.findKanjiMetaBulk(['?'], titles));
-    await assert.rejects(async () => await database.findTagForTitle('tag', title));
-    await assert.rejects(async () => await database.getDictionaryInfo());
-    await assert.rejects(async () => await database.getDictionaryCounts(titles, true));
-    await assert.rejects(async () => await dictionaryImporter.import(database, testDictionarySource, {}, () => {}));
+    await assert.rejects(async () => await dictionaryDatabase.deleteDictionary(title, {rate: 1000}, () => {}));
+    await assert.rejects(async () => await dictionaryDatabase.findTermsBulk(['?'], titles, null));
+    await assert.rejects(async () => await dictionaryDatabase.findTermsExactBulk(['?'], ['?'], titles));
+    await assert.rejects(async () => await dictionaryDatabase.findTermsBySequenceBulk([1], title));
+    await assert.rejects(async () => await dictionaryDatabase.findTermMetaBulk(['?'], titles));
+    await assert.rejects(async () => await dictionaryDatabase.findTermMetaBulk(['?'], titles));
+    await assert.rejects(async () => await dictionaryDatabase.findKanjiBulk(['?'], titles));
+    await assert.rejects(async () => await dictionaryDatabase.findKanjiMetaBulk(['?'], titles));
+    await assert.rejects(async () => await dictionaryDatabase.findTagForTitle('tag', title));
+    await assert.rejects(async () => await dictionaryDatabase.getDictionaryInfo());
+    await assert.rejects(async () => await dictionaryDatabase.getDictionaryCounts(titles, true));
+    await assert.rejects(async () => await dictionaryImporter.importDictionary(dictionaryDatabase, testDictionarySource, {}, () => {}));
 
-    await database.prepare();
+    await dictionaryDatabase.prepare();
 
     // Error: already prepared
-    await assert.rejects(async () => await database.prepare());
+    await assert.rejects(async () => await dictionaryDatabase.prepare());
 
-    await dictionaryImporter.import(database, testDictionarySource, {}, () => {});
+    await dictionaryImporter.importDictionary(dictionaryDatabase, testDictionarySource, {}, () => {});
 
     // Error: dictionary already imported
-    await assert.rejects(async () => await dictionaryImporter.import(database, testDictionarySource, {}, () => {}));
+    await assert.rejects(async () => await dictionaryImporter.importDictionary(dictionaryDatabase, testDictionarySource, {}, () => {}));
 
-    await database.close();
+    await dictionaryDatabase.close();
 }
 
 
@@ -903,8 +905,8 @@ async function testDatabase3() {
 
     // Setup database
     const dictionaryImporter = new DictionaryImporter();
-    const database = new Database();
-    await database.prepare();
+    const dictionaryDatabase = new DictionaryDatabase();
+    await dictionaryDatabase.prepare();
 
     for (const invalidDictionary of invalidDictionaries) {
         const testDictionary = yomichanTest.createTestDictionaryArchive(invalidDictionary);
@@ -912,7 +914,7 @@ async function testDatabase3() {
 
         let error = null;
         try {
-            await dictionaryImporter.import(database, testDictionarySource, {}, () => {});
+            await dictionaryImporter.importDictionary(dictionaryDatabase, testDictionarySource, {}, () => {});
         } catch (e) {
             error = e;
         }
@@ -927,7 +929,7 @@ async function testDatabase3() {
         }
     }
 
-    await database.close();
+    await dictionaryDatabase.close();
 }
 
 

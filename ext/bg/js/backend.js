@@ -21,75 +21,74 @@
  * AudioSystem
  * AudioUriBuilder
  * ClipboardMonitor
- * Database
+ * DictionaryDatabase
  * DictionaryImporter
  * Environment
  * JsonSchema
  * Mecab
  * ObjectPropertyAccessor
+ * OptionsUtil
+ * RequestBuilder
  * TemplateRenderer
  * Translator
  * conditionsTestValue
  * dictTermsSort
  * jp
- * optionsLoad
- * optionsSave
  * profileConditionsDescriptor
  * profileConditionsDescriptorPromise
- * requestJson
- * requestText
- * utilIsolate
  */
 
 class Backend {
     constructor() {
-        this.environment = new Environment();
-        this.database = new Database();
-        this.dictionaryImporter = new DictionaryImporter();
-        this.translator = new Translator(this.database);
-        this.anki = new AnkiConnect();
-        this.mecab = new Mecab();
-        this.clipboardMonitor = new ClipboardMonitor({getClipboard: this._onApiClipboardGet.bind(this)});
-        this.options = null;
-        this.optionsSchema = null;
-        this.defaultAnkiFieldTemplates = null;
-        this.audioUriBuilder = new AudioUriBuilder();
-        this.audioSystem = new AudioSystem({
-            audioUriBuilder: this.audioUriBuilder,
+        this._environment = new Environment();
+        this._dictionaryDatabase = new DictionaryDatabase();
+        this._dictionaryImporter = new DictionaryImporter();
+        this._translator = new Translator(this._dictionaryDatabase);
+        this._anki = new AnkiConnect();
+        this._mecab = new Mecab();
+        this._clipboardMonitor = new ClipboardMonitor({getClipboard: this._onApiClipboardGet.bind(this)});
+        this._options = null;
+        this._optionsSchema = null;
+        this._defaultAnkiFieldTemplates = null;
+        this._requestBuilder = new RequestBuilder();
+        this._audioUriBuilder = new AudioUriBuilder({
+            requestBuilder: this._requestBuilder
+        });
+        this._audioSystem = new AudioSystem({
+            audioUriBuilder: this._audioUriBuilder,
+            requestBuilder: this._requestBuilder,
             useCache: false
         });
-        this.ankiNoteBuilder = new AnkiNoteBuilder({
-            anki: this.anki,
-            audioSystem: this.audioSystem,
+        this._ankiNoteBuilder = new AnkiNoteBuilder({
+            anki: this._anki,
+            audioSystem: this._audioSystem,
             renderTemplate: this._renderTemplate.bind(this)
         });
         this._templateRenderer = new TemplateRenderer();
 
-        const url = (typeof window === 'object' && window !== null ? window.location.href : '');
-        this.optionsContext = {depth: 0, url};
-
-        this.clipboardPasteTarget = (
+        this._clipboardPasteTarget = (
             typeof document === 'object' && document !== null ?
             document.querySelector('#clipboard-paste-target') :
             null
         );
 
-        this.popupWindow = null;
+        this._searchPopupTabId = null;
+        this._searchPopupTabCreatePromise = null;
 
         this._isPrepared = false;
         this._prepareError = false;
         this._preparePromise = null;
-        this._prepareCompletePromise = new Promise((resolve, reject) => {
-            this._prepareCompleteResolve = resolve;
-            this._prepareCompleteReject = reject;
-        });
+        const {promise, resolve, reject} = deferPromise();
+        this._prepareCompletePromise = promise;
+        this._prepareCompleteResolve = resolve;
+        this._prepareCompleteReject = reject;
 
         this._defaultBrowserActionTitle = null;
         this._badgePrepareDelayTimer = null;
         this._logErrorLevel = null;
 
         this._messageHandlers = new Map([
-            ['yomichanCoreReady',            {async: false, contentScript: true,  handler: this._onApiYomichanCoreReady.bind(this)}],
+            ['requestBackendReadySignal',    {async: false, contentScript: true,  handler: this._onApiRequestBackendReadySignal.bind(this)}],
             ['optionsSchemaGet',             {async: false, contentScript: true,  handler: this._onApiOptionsSchemaGet.bind(this)}],
             ['optionsGet',                   {async: false, contentScript: true,  handler: this._onApiOptionsGet.bind(this)}],
             ['optionsGetFull',               {async: false, contentScript: true,  handler: this._onApiOptionsGetFull.bind(this)}],
@@ -127,7 +126,8 @@ class Backend {
             ['createActionPort',             {async: false, contentScript: true,  handler: this._onApiCreateActionPort.bind(this)}],
             ['modifySettings',               {async: true,  contentScript: true,  handler: this._onApiModifySettings.bind(this)}],
             ['getSettings',                  {async: false, contentScript: true,  handler: this._onApiGetSettings.bind(this)}],
-            ['setAllSettings',               {async: true,  contentScript: false, handler: this._onApiSetAllSettings.bind(this)}]
+            ['setAllSettings',               {async: true,  contentScript: false, handler: this._onApiSetAllSettings.bind(this)}],
+            ['getOrCreateSearchPopup',       {async: true,  contentScript: true,  handler: this._onApiGetOrCreateSearchPopup.bind(this)}]
         ]);
         this._messageHandlersWithProgress = new Map([
             ['importDictionaryArchive', {async: true,  contentScript: false, handler: this._onApiImportDictionaryArchive.bind(this)}],
@@ -161,8 +161,28 @@ class Backend {
         return this._prepareCompletePromise;
     }
 
+    _prepareInternalSync() {
+        if (isObject(chrome.commands) && isObject(chrome.commands.onCommand)) {
+            const onCommand = this._onWebExtensionEventWrapper(this._onCommand.bind(this));
+            chrome.commands.onCommand.addListener(onCommand);
+        }
+
+        if (isObject(chrome.tabs) && isObject(chrome.tabs.onZoomChange)) {
+            const onZoomChange = this._onWebExtensionEventWrapper(this._onZoomChange.bind(this));
+            chrome.tabs.onZoomChange.addListener(onZoomChange);
+        }
+
+        const onConnect = this._onWebExtensionEventWrapper(this._onConnect.bind(this));
+        chrome.runtime.onConnect.addListener(onConnect);
+
+        const onMessage = this._onMessageWrapper.bind(this);
+        chrome.runtime.onMessage.addListener(onMessage);
+    }
+
     async _prepareInternal() {
         try {
+            this._prepareInternalSync();
+
             this._defaultBrowserActionTitle = await this._getBrowserIconTitle();
             this._badgePrepareDelayTimer = setTimeout(() => {
                 this._badgePrepareDelayTimer = null;
@@ -172,33 +192,33 @@ class Backend {
 
             yomichan.on('log', this._onLog.bind(this));
 
-            await this.environment.prepare();
+            await this._environment.prepare();
             try {
-                await this.database.prepare();
+                await this._dictionaryDatabase.prepare();
             } catch (e) {
                 yomichan.logError(e);
             }
-            await this.translator.prepare();
+            await this._translator.prepare();
 
             await profileConditionsDescriptorPromise;
 
-            this.optionsSchema = await requestJson(chrome.runtime.getURL('/bg/data/options-schema.json'), 'GET');
-            this.defaultAnkiFieldTemplates = (await requestText(chrome.runtime.getURL('/bg/data/default-anki-field-templates.handlebars'), 'GET')).trim();
-            this.options = await optionsLoad();
-            this.options = JsonSchema.getValidValueOrDefault(this.optionsSchema, this.options);
+            this._optionsSchema = await this._fetchAsset('/bg/data/options-schema.json', true);
+            this._defaultAnkiFieldTemplates = (await this._fetchAsset('/bg/data/default-anki-field-templates.handlebars')).trim();
+            this._options = await OptionsUtil.load();
+            this._options = JsonSchema.getValidValueOrDefault(this._optionsSchema, this._options);
 
-            this.onOptionsUpdated('background');
+            this._applyOptions('background');
 
-            const options = this.getOptions(this.optionsContext);
+            const options = this.getOptions({current: true});
             if (options.general.showGuide) {
                 chrome.tabs.create({url: chrome.runtime.getURL('/bg/guide.html')});
             }
 
-            this.clipboardMonitor.on('change', this._onClipboardText.bind(this));
+            this._clipboardMonitor.on('change', this._onClipboardTextChange.bind(this));
 
-            this._sendMessageAllTabs('backendPrepared');
-            const callback = () => this.checkLastError(chrome.runtime.lastError);
-            chrome.runtime.sendMessage({action: 'backendPrepared'}, callback);
+            this._sendMessageAllTabs('backendReady');
+            const callback = () => this._checkLastError(chrome.runtime.lastError);
+            chrome.runtime.sendMessage({action: 'backendReady'}, callback);
         } catch (e) {
             yomichan.logError(e);
             throw e;
@@ -210,91 +230,120 @@ class Backend {
         }
     }
 
-    prepareComplete() {
-        return this._prepareCompletePromise;
-    }
-
     isPrepared() {
         return this._isPrepared;
     }
 
-    handleCommand(...args) {
-        return this._runCommand(...args);
+    getFullOptions(useSchema=false) {
+        const options = this._options;
+        return useSchema ? JsonSchema.createProxy(options, this._optionsSchema) : options;
     }
 
-    handleZoomChange(...args) {
-        return this._onZoomChange(...args);
+    getOptions(optionsContext, useSchema=false) {
+        return this._getProfile(optionsContext, useSchema).options;
     }
 
-    handleConnect(...args) {
-        return this._onConnect(...args);
+    // Event handlers
+
+    async _onClipboardTextChange({text}) {
+        try {
+            const {tab, created} = await this._getOrCreateSearchPopup();
+            await this._focusTab(tab);
+            await this._updateSearchQuery(tab.id, text, !created);
+        } catch (e) {
+            // NOP
+        }
     }
 
-    handleMessage(...args) {
-        return this.onMessage(...args);
+    _onLog({level}) {
+        const levelValue = this._getErrorLevelValue(level);
+        if (levelValue <= this._getErrorLevelValue(this._logErrorLevel)) { return; }
+
+        this._logErrorLevel = level;
+        this._updateBadge();
     }
 
-    _sendMessageAllTabs(action, params={}) {
-        const callback = () => this.checkLastError(chrome.runtime.lastError);
-        chrome.tabs.query({}, (tabs) => {
-            for (const tab of tabs) {
-                chrome.tabs.sendMessage(tab.id, {action, params}, callback);
+    // WebExtension event handlers (with prepared checks)
+
+    _onWebExtensionEventWrapper(handler) {
+        return (...args) => {
+            if (this._isPrepared) {
+                handler(...args);
+                return;
             }
-        });
+
+            this._prepareCompletePromise.then(
+                () => { handler(...args); },
+                () => {} // NOP
+            );
+        };
     }
 
-    onOptionsUpdated(source) {
-        this.applyOptions();
-        this._sendMessageAllTabs('optionsUpdated', {source});
+    _onMessageWrapper(message, sender, sendResponse) {
+        if (this._isPrepared) {
+            return this._onMessage(message, sender, sendResponse);
+        }
+
+        this._prepareCompletePromise.then(
+            () => { this._onMessage(message, sender, sendResponse); },
+            () => { sendResponse(); }
+        );
+        return true;
     }
 
-    onMessage({action, params}, sender, callback) {
+    // WebExtension event handlers
+
+    _onCommand(command) {
+        this._runCommand(command);
+    }
+
+    _onMessage({action, params}, sender, callback) {
         const messageHandler = this._messageHandlers.get(action);
         if (typeof messageHandler === 'undefined') { return false; }
 
-        const {handler, async, contentScript} = messageHandler;
-
-        try {
-            if (!contentScript) {
+        if (!messageHandler.contentScript) {
+            try {
                 this._validatePrivilegedMessageSender(sender);
-            }
-
-            const promiseOrResult = handler(params, sender);
-            if (async) {
-                promiseOrResult.then(
-                    (result) => callback({result}),
-                    (error) => callback({error: errorToJson(error)})
-                );
-                return true;
-            } else {
-                callback({result: promiseOrResult});
+            } catch (error) {
+                callback({error: errorToJson(error)});
                 return false;
             }
-        } catch (error) {
-            callback({error: errorToJson(error)});
-            return false;
         }
+
+        return yomichan.invokeMessageHandler(messageHandler, params, callback, sender);
     }
 
     _onConnect(port) {
         try {
-            const match = /^background-cross-frame-communication-port-(\d+)$/.exec(`${port.name}`);
-            if (match === null) { return; }
+            let details;
+            try {
+                details = JSON.parse(port.name);
+            } catch (e) {
+                return;
+            }
+            if (details.name !== 'background-cross-frame-communication-port') { return; }
 
             const tabId = (port.sender && port.sender.tab ? port.sender.tab.id : null);
             if (typeof tabId !== 'number') {
                 throw new Error('Port does not have an associated tab ID');
             }
             const senderFrameId = port.sender.frameId;
-            if (typeof tabId !== 'number') {
+            if (typeof senderFrameId !== 'number') {
                 throw new Error('Port does not have an associated frame ID');
             }
-            const targetFrameId = parseInt(match[1], 10);
+            let {targetTabId, targetFrameId} = details;
+            if (typeof targetTabId !== 'number') {
+                targetTabId = tabId;
+            }
 
-            let forwardPort = chrome.tabs.connect(tabId, {frameId: targetFrameId, name: `cross-frame-communication-port-${senderFrameId}`});
+            const details2 = {
+                name: 'cross-frame-communication-port',
+                sourceFrameId: senderFrameId
+            };
+            let forwardPort = chrome.tabs.connect(targetTabId, {frameId: targetFrameId, name: JSON.stringify(details2)});
 
             const cleanup = () => {
-                this.checkLastError(chrome.runtime.lastError);
+                this._checkLastError(chrome.runtime.lastError);
                 if (forwardPort !== null) {
                     forwardPort.disconnect();
                     forwardPort = null;
@@ -315,174 +364,17 @@ class Backend {
         }
     }
 
-    _onClipboardText({text}) {
-        this._onCommandSearch({mode: 'popup', query: text});
-    }
-
     _onZoomChange({tabId, oldZoomFactor, newZoomFactor}) {
-        const callback = () => this.checkLastError(chrome.runtime.lastError);
+        const callback = () => this._checkLastError(chrome.runtime.lastError);
         chrome.tabs.sendMessage(tabId, {action: 'zoomChanged', params: {oldZoomFactor, newZoomFactor}}, callback);
-    }
-
-    _onLog({level}) {
-        const levelValue = this._getErrorLevelValue(level);
-        if (levelValue <= this._getErrorLevelValue(this._logErrorLevel)) { return; }
-
-        this._logErrorLevel = level;
-        this._updateBadge();
-    }
-
-    applyOptions() {
-        const options = this.getOptions(this.optionsContext);
-        this._updateBadge();
-
-        this.anki.setServer(options.anki.server);
-        this.anki.setEnabled(options.anki.enable);
-
-        if (options.parsing.enableMecabParser) {
-            this.mecab.startListener();
-        } else {
-            this.mecab.stopListener();
-        }
-
-        if (options.general.enableClipboardPopups) {
-            this.clipboardMonitor.start();
-        } else {
-            this.clipboardMonitor.stop();
-        }
-    }
-
-    getOptionsSchema() {
-        return this.optionsSchema;
-    }
-
-    getFullOptions(useSchema=false) {
-        const options = this.options;
-        return useSchema ? JsonSchema.createProxy(options, this.optionsSchema) : options;
-    }
-
-    getOptions(optionsContext, useSchema=false) {
-        return this.getProfile(optionsContext, useSchema).options;
-    }
-
-    getProfile(optionsContext, useSchema=false) {
-        const options = this.getFullOptions(useSchema);
-        const profiles = options.profiles;
-        if (typeof optionsContext.index === 'number') {
-            return profiles[optionsContext.index];
-        }
-        const profile = this.getProfileFromContext(options, optionsContext);
-        return profile !== null ? profile : options.profiles[options.profileCurrent];
-    }
-
-    getProfileFromContext(options, optionsContext) {
-        for (const profile of options.profiles) {
-            const conditionGroups = profile.conditionGroups;
-            if (conditionGroups.length > 0 && Backend.testConditionGroups(conditionGroups, optionsContext)) {
-                return profile;
-            }
-        }
-        return null;
-    }
-
-    static testConditionGroups(conditionGroups, data) {
-        if (conditionGroups.length === 0) { return false; }
-
-        for (const conditionGroup of conditionGroups) {
-            const conditions = conditionGroup.conditions;
-            if (conditions.length > 0 && Backend.testConditions(conditions, data)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    static testConditions(conditions, data) {
-        for (const condition of conditions) {
-            if (!conditionsTestValue(profileConditionsDescriptor, condition.type, condition.operator, condition.value, data)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    checkLastError() {
-        // NOP
-    }
-
-    _runCommand(command, params) {
-        const handler = this._commandHandlers.get(command);
-        if (typeof handler !== 'function') { return false; }
-
-        handler(params);
-        return true;
-    }
-
-    async importDictionary(archiveSource, onProgress, details) {
-        return await this.dictionaryImporter.import(this.database, archiveSource, onProgress, details);
-    }
-
-    async _textParseScanning(text, options) {
-        const results = [];
-        while (text.length > 0) {
-            const term = [];
-            const [definitions, sourceLength] = await this.translator.findTerms(
-                'simple',
-                text.substring(0, options.scanning.length),
-                {},
-                options
-            );
-            if (definitions.length > 0 && sourceLength > 0) {
-                dictTermsSort(definitions);
-                const {expression, reading} = definitions[0];
-                const source = text.substring(0, sourceLength);
-                for (const {text: text2, furigana} of jp.distributeFuriganaInflected(expression, reading, source)) {
-                    const reading2 = jp.convertReading(text2, furigana, options.parsing.readingMode);
-                    term.push({text: text2, reading: reading2});
-                }
-                text = text.substring(source.length);
-            } else {
-                const reading = jp.convertReading(text[0], '', options.parsing.readingMode);
-                term.push({text: text[0], reading});
-                text = text.substring(1);
-            }
-            results.push(term);
-        }
-        return results;
-    }
-
-    async _textParseMecab(text, options) {
-        const results = [];
-        const rawResults = await this.mecab.parseText(text);
-        for (const [mecabName, parsedLines] of Object.entries(rawResults)) {
-            const result = [];
-            for (const parsedLine of parsedLines) {
-                for (const {expression, reading, source} of parsedLine) {
-                    const term = [];
-                    for (const {text: text2, furigana} of jp.distributeFuriganaInflected(
-                        expression.length > 0 ? expression : source,
-                        jp.convertKatakanaToHiragana(reading),
-                        source
-                    )) {
-                        const reading2 = jp.convertReading(text2, furigana, options.parsing.readingMode);
-                        term.push({text: text2, reading: reading2});
-                    }
-                    result.push(term);
-                }
-                result.push([{text: '\n', reading: ''}]);
-            }
-            results.push([mecabName, result]);
-        }
-        return results;
     }
 
     // Message handlers
 
-    _onApiYomichanCoreReady(_params, sender) {
+    _onApiRequestBackendReadySignal(_params, sender) {
         // tab ID isn't set in background (e.g. browser_action)
-        const callback = () => this.checkLastError(chrome.runtime.lastError);
-        const data = {action: 'backendPrepared'};
+        const callback = () => this._checkLastError(chrome.runtime.lastError);
+        const data = {action: 'backendReady'};
         if (typeof sender.tab === 'undefined') {
             chrome.runtime.sendMessage(data, callback);
             return false;
@@ -493,7 +385,7 @@ class Backend {
     }
 
     _onApiOptionsSchemaGet() {
-        return this.getOptionsSchema();
+        return this._optionsSchema;
     }
 
     _onApiOptionsGet({optionsContext}) {
@@ -506,13 +398,13 @@ class Backend {
 
     async _onApiOptionsSave({source}) {
         const options = this.getFullOptions();
-        await optionsSave(options);
-        this.onOptionsUpdated(source);
+        await OptionsUtil.save(options);
+        this._applyOptions(source);
     }
 
     async _onApiKanjiFind({text, optionsContext}) {
         const options = this.getOptions(optionsContext);
-        const definitions = await this.translator.findKanji(text, options);
+        const definitions = await this._translator.findKanji(text, options);
         definitions.splice(options.general.maxResults);
         return definitions;
     }
@@ -520,7 +412,7 @@ class Backend {
     async _onApiTermsFind({text, details, optionsContext}) {
         const options = this.getOptions(optionsContext);
         const mode = options.general.resultOutputMode;
-        const [definitions, length] = await this.translator.findTerms(mode, text, details, options);
+        const [definitions, length] = await this._translator.findTerms(mode, text, details, options);
         definitions.splice(options.general.maxResults);
         return {length, definitions};
     }
@@ -558,7 +450,7 @@ class Backend {
 
         if (mode !== 'kanji') {
             const {customSourceUrl} = options.audio;
-            await this.ankiNoteBuilder.injectAudio(
+            await this._ankiNoteBuilder.injectAudio(
                 definition,
                 options.anki.terms.fields,
                 options.audio.sources,
@@ -567,15 +459,15 @@ class Backend {
         }
 
         if (details && details.screenshot) {
-            await this.ankiNoteBuilder.injectScreenshot(
+            await this._ankiNoteBuilder.injectScreenshot(
                 definition,
                 options.anki.terms.fields,
                 details.screenshot
             );
         }
 
-        const note = await this.ankiNoteBuilder.createNote(definition, mode, context, options, templates);
-        return this.anki.addNote(note);
+        const note = await this._ankiNoteBuilder.createNote(definition, mode, context, options, templates);
+        return this._anki.addNote(note);
     }
 
     async _onApiDefinitionsAddable({definitions, modes, context, optionsContext}) {
@@ -587,14 +479,14 @@ class Backend {
             const notePromises = [];
             for (const definition of definitions) {
                 for (const mode of modes) {
-                    const notePromise = this.ankiNoteBuilder.createNote(definition, mode, context, options, templates);
+                    const notePromise = this._ankiNoteBuilder.createNote(definition, mode, context, options, templates);
                     notePromises.push(notePromise);
                 }
             }
             const notes = await Promise.all(notePromises);
 
             const cannotAdd = [];
-            const results = await this.anki.canAddNotes(notes);
+            const results = await this._anki.canAddNotes(notes);
             for (let resultBase = 0; resultBase < results.length; resultBase += modes.length) {
                 const state = {};
                 for (let modeOffset = 0; modeOffset < modes.length; ++modeOffset) {
@@ -611,7 +503,7 @@ class Backend {
             }
 
             if (cannotAdd.length > 0) {
-                const noteIdsArray = await this.anki.findNoteIds(cannotAdd.map((e) => e[0]), options.anki.duplicateScope);
+                const noteIdsArray = await this._anki.findNoteIds(cannotAdd.map((e) => e[0]), options.anki.duplicateScope);
                 for (let i = 0, ii = Math.min(cannotAdd.length, noteIdsArray.length); i < ii; ++i) {
                     const noteIds = noteIdsArray[i];
                     if (noteIds.length > 0) {
@@ -627,7 +519,7 @@ class Backend {
     }
 
     async _onApiNoteView({noteId}) {
-        return await this.anki.guiBrowse(`nid:${noteId}`);
+        return await this._anki.guiBrowse(`nid:${noteId}`);
     }
 
     async _onApiTemplateRender({template, data}) {
@@ -639,7 +531,7 @@ class Backend {
     }
 
     async _onApiAudioGetUri({definition, source, details}) {
-        return await this.audioUriBuilder.getUri(definition, source, details);
+        return await this._audioUriBuilder.getUri(definition, source, details);
     }
 
     _onApiScreenshotGet({options}, sender) {
@@ -653,14 +545,15 @@ class Backend {
         });
     }
 
-    _onApiSendMessageToFrame({frameId, action, params}, sender) {
+    _onApiSendMessageToFrame({frameId: targetFrameId, action, params}, sender) {
         if (!(sender && sender.tab)) {
             return false;
         }
 
         const tabId = sender.tab.id;
-        const callback = () => this.checkLastError(chrome.runtime.lastError);
-        chrome.tabs.sendMessage(tabId, {action, params}, {frameId}, callback);
+        const frameId = sender.frameId;
+        const callback = () => this._checkLastError(chrome.runtime.lastError);
+        chrome.tabs.sendMessage(tabId, {action, params, frameId}, {frameId: targetFrameId}, callback);
         return true;
     }
 
@@ -670,8 +563,9 @@ class Backend {
         }
 
         const tabId = sender.tab.id;
-        const callback = () => this.checkLastError(chrome.runtime.lastError);
-        chrome.tabs.sendMessage(tabId, {action, params}, callback);
+        const frameId = sender.frameId;
+        const callback = () => this._checkLastError(chrome.runtime.lastError);
+        chrome.tabs.sendMessage(tabId, {action, params, frameId}, callback);
         return true;
     }
 
@@ -724,11 +618,11 @@ class Backend {
         if (!url.startsWith('/') || url.startsWith('//') || !url.endsWith('.css')) {
             throw new Error('Invalid URL');
         }
-        return await requestText(url, 'GET');
+        return await this._fetchAsset(url);
     }
 
     _onApiGetEnvironmentInfo() {
-        return this.environment.getInfo();
+        return this._environment.getInfo();
     }
 
     async _onApiClipboardGet() {
@@ -744,11 +638,11 @@ class Backend {
               being an extension with clipboard permissions. It effectively asks for the
               non-extension permission for clipboard access.
         */
-        const {browser} = this.environment.getInfo();
+        const {browser} = this._environment.getInfo();
         if (browser === 'firefox' || browser === 'firefox-mobile') {
             return await navigator.clipboard.readText();
         } else {
-            const clipboardPasteTarget = this.clipboardPasteTarget;
+            const clipboardPasteTarget = this._clipboardPasteTarget;
             if (clipboardPasteTarget === null) {
                 throw new Error('Reading the clipboard is not supported in this context');
             }
@@ -762,13 +656,11 @@ class Backend {
     }
 
     async _onApiGetDisplayTemplatesHtml() {
-        const url = chrome.runtime.getURL('/mixed/display-templates.html');
-        return await requestText(url, 'GET');
+        return await this._fetchAsset('/mixed/display-templates.html');
     }
 
     async _onApiGetQueryParserTemplatesHtml() {
-        const url = chrome.runtime.getURL('/bg/query-parser-templates.html');
-        return await requestText(url, 'GET');
+        return await this._fetchAsset('/bg/query-parser-templates.html');
     }
 
     _onApiGetZoom(params, sender) {
@@ -799,36 +691,36 @@ class Backend {
     }
 
     _onApiGetDefaultAnkiFieldTemplates() {
-        return this.defaultAnkiFieldTemplates;
+        return this._defaultAnkiFieldTemplates;
     }
 
     async _onApiGetAnkiDeckNames() {
-        return await this.anki.getDeckNames();
+        return await this._anki.getDeckNames();
     }
 
     async _onApiGetAnkiModelNames() {
-        return await this.anki.getModelNames();
+        return await this._anki.getModelNames();
     }
 
     async _onApiGetAnkiModelFieldNames({modelName}) {
-        return await this.anki.getModelFieldNames(modelName);
+        return await this._anki.getModelFieldNames(modelName);
     }
 
     async _onApiGetDictionaryInfo() {
-        return await this.translator.database.getDictionaryInfo();
+        return await this._translator.database.getDictionaryInfo();
     }
 
     async _onApiGetDictionaryCounts({dictionaryNames, getTotal}) {
-        return await this.translator.database.getDictionaryCounts(dictionaryNames, getTotal);
+        return await this._translator.database.getDictionaryCounts(dictionaryNames, getTotal);
     }
 
     async _onApiPurgeDatabase() {
-        this.translator.clearDatabaseCaches();
-        await this.database.purge();
+        this._translator.clearDatabaseCaches();
+        await this._dictionaryDatabase.purge();
     }
 
     async _onApiGetMedia({targets}) {
-        return await this.database.getMedia(targets);
+        return await this._dictionaryDatabase.getMedia(targets);
     }
 
     _onApiLog({error, level, context}) {
@@ -848,9 +740,12 @@ class Backend {
 
         const frameId = sender.frameId;
         const id = yomichan.generateId(16);
-        const portName = `action-port-${id}`;
+        const details = {
+            name: 'action-port',
+            id
+        };
 
-        const port = chrome.tabs.connect(tabId, {name: portName, frameId});
+        const port = chrome.tabs.connect(tabId, {name: JSON.stringify(details), frameId});
         try {
             this._createActionListenerPort(port, sender, this._messageHandlersWithProgress);
         } catch (e) {
@@ -858,16 +753,16 @@ class Backend {
             throw e;
         }
 
-        return portName;
+        return details;
     }
 
     async _onApiImportDictionaryArchive({archiveContent, details}, sender, onProgress) {
-        return await this.dictionaryImporter.import(this.database, archiveContent, details, onProgress);
+        return await this._dictionaryImporter.importDictionary(this._dictionaryDatabase, archiveContent, details, onProgress);
     }
 
     async _onApiDeleteDictionary({dictionaryName}, sender, onProgress) {
-        this.translator.clearDatabaseCaches();
-        await this.database.deleteDictionary(dictionaryName, {rate: 1000}, onProgress);
+        this._translator.clearDatabaseCaches();
+        await this._dictionaryDatabase.deleteDictionary(dictionaryName, {rate: 1000}, onProgress);
     }
 
     async _onApiModifySettings({targets, source}) {
@@ -875,7 +770,7 @@ class Backend {
         for (const target of targets) {
             try {
                 const result = this._modifySetting(target);
-                results.push({result: utilIsolate(result)});
+                results.push({result: clone(result)});
             } catch (e) {
                 results.push({error: errorToJson(e)});
             }
@@ -889,7 +784,7 @@ class Backend {
         for (const target of targets) {
             try {
                 const result = this._getSetting(target);
-                results.push({result: utilIsolate(result)});
+                results.push({result: clone(result)});
             } catch (e) {
                 results.push({error: errorToJson(e)});
             }
@@ -898,11 +793,336 @@ class Backend {
     }
 
     async _onApiSetAllSettings({value, source}) {
-        this.options = JsonSchema.getValidValueOrDefault(this.optionsSchema, value);
+        this._options = JsonSchema.getValidValueOrDefault(this._optionsSchema, value);
         await this._onApiOptionsSave({source});
     }
 
+    async _onApiGetOrCreateSearchPopup({focus=false, text=null}) {
+        const {tab, created} = await this._getOrCreateSearchPopup();
+        if (focus === true || (focus === 'ifCreated' && created)) {
+            await this._focusTab(tab);
+        }
+        if (typeof text === 'string') {
+            await this._updateSearchQuery(tab.id, text, !created);
+        }
+        return {tabId: tab.id, windowId: tab.windowId};
+    }
+
     // Command handlers
+
+    async _onCommandSearch(params) {
+        const {mode='existingOrNewTab', query} = params || {};
+
+        const baseUrl = chrome.runtime.getURL('/bg/search.html');
+        const queryParams = {};
+        if (query && query.length > 0) { queryParams.query = query; }
+        const queryString = new URLSearchParams(queryParams).toString();
+        let url = baseUrl;
+        if (queryString.length > 0) {
+            url += `?${queryString}`;
+        }
+
+        const isTabMatch = (url2) => {
+            if (url2 === null || !url2.startsWith(baseUrl)) { return false; }
+            const {baseUrl: baseUrl2, queryParams: queryParams2} = parseUrl(url2);
+            return baseUrl2 === baseUrl && (queryParams2.mode === mode || (!queryParams2.mode && mode === 'existingOrNewTab'));
+        };
+
+        const openInTab = async () => {
+            const tab = await this._findTab(1000, isTabMatch);
+            if (tab !== null) {
+                await this._focusTab(tab);
+                if (queryParams.query) {
+                    await this._updateSearchQuery(tab.id, queryParams.query, true);
+                }
+                return true;
+            }
+        };
+
+        switch (mode) {
+            case 'existingOrNewTab':
+                try {
+                    if (await openInTab()) { return; }
+                } catch (e) {
+                    // NOP
+                }
+                chrome.tabs.create({url});
+                return;
+            case 'newTab':
+                chrome.tabs.create({url});
+                return;
+        }
+    }
+
+    _onCommandHelp() {
+        chrome.tabs.create({url: 'https://foosoft.net/projects/yomichan/'});
+    }
+
+    _onCommandOptions(params) {
+        const {mode='existingOrNewTab'} = params || {};
+        if (mode === 'existingOrNewTab') {
+            chrome.runtime.openOptionsPage();
+        } else if (mode === 'newTab') {
+            const manifest = chrome.runtime.getManifest();
+            const url = chrome.runtime.getURL(manifest.options_ui.page);
+            chrome.tabs.create({url});
+        }
+    }
+
+    async _onCommandToggle() {
+        const source = 'popup';
+        const options = this.getOptions({current: true});
+        options.general.enable = !options.general.enable;
+        await this._onApiOptionsSave({source});
+    }
+
+    // Utilities
+
+    _getOrCreateSearchPopup() {
+        if (this._searchPopupTabCreatePromise === null) {
+            const promise = this._getOrCreateSearchPopup2();
+            this._searchPopupTabCreatePromise = promise;
+            promise.then(() => { this._searchPopupTabCreatePromise = null; });
+        }
+        return this._searchPopupTabCreatePromise;
+    }
+
+    async _getOrCreateSearchPopup2() {
+        // Reuse same tab
+        const baseUrl = chrome.runtime.getURL('/bg/search.html');
+        if (this._searchPopupTabId !== null) {
+            const tabId = this._searchPopupTabId;
+            const tab = await new Promise((resolve) => {
+                chrome.tabs.get(
+                    tabId,
+                    (result) => { resolve(chrome.runtime.lastError ? null : result); }
+                );
+            });
+            if (tab !== null) {
+                const isValidTab = await new Promise((resolve) => {
+                    chrome.tabs.sendMessage(
+                        tabId,
+                        {action: 'getUrl', params: {}},
+                        {frameId: 0},
+                        (response) => {
+                            let result = false;
+                            try {
+                                const {url} = yomichan.getMessageResponseResult(response);
+                                result = url.startsWith(baseUrl);
+                            } catch (e) {
+                                // NOP
+                            }
+                            resolve(result);
+                        }
+                    );
+                });
+                // windowId
+                if (isValidTab) {
+                    return {tab, created: false};
+                }
+            }
+            this._searchPopupTabId = null;
+        }
+
+        // chrome.windows not supported (e.g. on Firefox mobile)
+        if (!isObject(chrome.windows)) {
+            throw new Error('Window creation not supported');
+        }
+
+        // Create a new window
+        const options = this.getOptions({current: true});
+        const {popupWidth, popupHeight} = options.general;
+        const popupWindow = await new Promise((resolve, reject) => {
+            chrome.windows.create(
+                {
+                    url: `${baseUrl}?mode=popup`,
+                    width: popupWidth,
+                    height: popupHeight,
+                    type: 'popup'
+                },
+                (result) => {
+                    const error = chrome.runtime.lastError;
+                    if (error) {
+                        reject(new Error(error.message));
+                    } else {
+                        resolve(result);
+                    }
+                }
+            );
+        });
+
+        const {tabs} = popupWindow;
+        if (tabs.length === 0) {
+            throw new Error('Created window did not contain a tab');
+        }
+
+        const tab = tabs[0];
+        await this._waitUntilTabFrameIsReady(tab.id, 0, 2000);
+
+        this._searchPopupTabId = tab.id;
+        return {tab, created: true};
+    }
+
+    _updateSearchQuery(tabId, text, animate) {
+        return new Promise((resolve, reject) => {
+            const callback = (response) => {
+                try {
+                    resolve(yomichan.getMessageResponseResult(response));
+                } catch (error) {
+                    reject(error);
+                }
+            };
+
+            const message = {action: 'updateSearchQuery', params: {text, animate}};
+            chrome.tabs.sendMessage(tabId, message, callback);
+        });
+    }
+
+    _sendMessageAllTabs(action, params={}) {
+        const callback = () => this._checkLastError(chrome.runtime.lastError);
+        chrome.tabs.query({}, (tabs) => {
+            for (const tab of tabs) {
+                chrome.tabs.sendMessage(tab.id, {action, params}, callback);
+            }
+        });
+    }
+
+    _applyOptions(source) {
+        const options = this.getOptions({current: true});
+        this._updateBadge();
+
+        this._anki.setServer(options.anki.server);
+        this._anki.setEnabled(options.anki.enable);
+
+        if (options.parsing.enableMecabParser) {
+            this._mecab.startListener();
+        } else {
+            this._mecab.stopListener();
+        }
+
+        if (options.general.enableClipboardPopups) {
+            this._clipboardMonitor.start();
+        } else {
+            this._clipboardMonitor.stop();
+        }
+
+        this._sendMessageAllTabs('optionsUpdated', {source});
+    }
+
+    _getProfile(optionsContext, useSchema=false) {
+        const options = this.getFullOptions(useSchema);
+        const profiles = options.profiles;
+        if (optionsContext.current) {
+            return profiles[options.profileCurrent];
+        }
+        if (typeof optionsContext.index === 'number') {
+            return profiles[optionsContext.index];
+        }
+        const profile = this._getProfileFromContext(options, optionsContext);
+        return profile !== null ? profile : profiles[options.profileCurrent];
+    }
+
+    _getProfileFromContext(options, optionsContext) {
+        for (const profile of options.profiles) {
+            const conditionGroups = profile.conditionGroups;
+            if (conditionGroups.length > 0 && this._testConditionGroups(conditionGroups, optionsContext)) {
+                return profile;
+            }
+        }
+        return null;
+    }
+
+    _testConditionGroups(conditionGroups, data) {
+        if (conditionGroups.length === 0) { return false; }
+
+        for (const conditionGroup of conditionGroups) {
+            const conditions = conditionGroup.conditions;
+            if (conditions.length > 0 && this._testConditions(conditions, data)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    _testConditions(conditions, data) {
+        for (const condition of conditions) {
+            if (!conditionsTestValue(profileConditionsDescriptor, condition.type, condition.operator, condition.value, data)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    _checkLastError() {
+        // NOP
+    }
+
+    _runCommand(command, params) {
+        const handler = this._commandHandlers.get(command);
+        if (typeof handler !== 'function') { return false; }
+
+        handler(params);
+        return true;
+    }
+
+    async _importDictionary(archiveSource, onProgress, details) {
+        return await this._dictionaryImporter.importDictionary(this._dictionaryDatabase, archiveSource, onProgress, details);
+    }
+
+    async _textParseScanning(text, options) {
+        const results = [];
+        while (text.length > 0) {
+            const term = [];
+            const [definitions, sourceLength] = await this._translator.findTerms(
+                'simple',
+                text.substring(0, options.scanning.length),
+                {},
+                options
+            );
+            if (definitions.length > 0 && sourceLength > 0) {
+                dictTermsSort(definitions);
+                const {expression, reading} = definitions[0];
+                const source = text.substring(0, sourceLength);
+                for (const {text: text2, furigana} of jp.distributeFuriganaInflected(expression, reading, source)) {
+                    const reading2 = jp.convertReading(text2, furigana, options.parsing.readingMode);
+                    term.push({text: text2, reading: reading2});
+                }
+                text = text.substring(source.length);
+            } else {
+                const reading = jp.convertReading(text[0], '', options.parsing.readingMode);
+                term.push({text: text[0], reading});
+                text = text.substring(1);
+            }
+            results.push(term);
+        }
+        return results;
+    }
+
+    async _textParseMecab(text, options) {
+        const results = [];
+        const rawResults = await this._mecab.parseText(text);
+        for (const [mecabName, parsedLines] of Object.entries(rawResults)) {
+            const result = [];
+            for (const parsedLine of parsedLines) {
+                for (const {expression, reading, source} of parsedLine) {
+                    const term = [];
+                    for (const {text: text2, furigana} of jp.distributeFuriganaInflected(
+                        expression.length > 0 ? expression : source,
+                        jp.convertKatakanaToHiragana(reading),
+                        source
+                    )) {
+                        const reading2 = jp.convertReading(text2, furigana, options.parsing.readingMode);
+                        term.push({text: text2, reading: reading2});
+                    }
+                    result.push(term);
+                }
+                result.push([{text: '\n', reading: ''}]);
+            }
+            results.push([mecabName, result]);
+        }
+        return results;
+    }
 
     _createActionListenerPort(port, sender, handlers) {
         let hasStarted = false;
@@ -995,97 +1215,6 @@ class Backend {
             default: return 0;
         }
     }
-
-    async _onCommandSearch(params) {
-        const {mode='existingOrNewTab', query} = params || {};
-
-        const options = this.getOptions(this.optionsContext);
-        const {popupWidth, popupHeight} = options.general;
-
-        const baseUrl = chrome.runtime.getURL('/bg/search.html');
-        const queryParams = {mode};
-        if (query && query.length > 0) { queryParams.query = query; }
-        const queryString = new URLSearchParams(queryParams).toString();
-        const url = `${baseUrl}?${queryString}`;
-
-        const isTabMatch = (url2) => {
-            if (url2 === null || !url2.startsWith(baseUrl)) { return false; }
-            const {baseUrl: baseUrl2, queryParams: queryParams2} = parseUrl(url2);
-            return baseUrl2 === baseUrl && (queryParams2.mode === mode || (!queryParams2.mode && mode === 'existingOrNewTab'));
-        };
-
-        const openInTab = async () => {
-            const tab = await Backend._findTab(1000, isTabMatch);
-            if (tab !== null) {
-                await Backend._focusTab(tab);
-                if (queryParams.query) {
-                    await new Promise((resolve) => chrome.tabs.sendMessage(
-                        tab.id,
-                        {action: 'searchQueryUpdate', params: {text: queryParams.query}},
-                        resolve
-                    ));
-                }
-                return true;
-            }
-        };
-
-        switch (mode) {
-            case 'existingOrNewTab':
-                try {
-                    if (await openInTab()) { return; }
-                } catch (e) {
-                    // NOP
-                }
-                chrome.tabs.create({url});
-                return;
-            case 'newTab':
-                chrome.tabs.create({url});
-                return;
-            case 'popup':
-                try {
-                    // chrome.windows not supported (e.g. on Firefox mobile)
-                    if (!isObject(chrome.windows)) { return; }
-                    if (await openInTab()) { return; }
-                    // if the previous popup is open in an invalid state, close it
-                    if (this.popupWindow !== null) {
-                        const callback = () => this.checkLastError(chrome.runtime.lastError);
-                        chrome.windows.remove(this.popupWindow.id, callback);
-                    }
-                    // open new popup
-                    this.popupWindow = await new Promise((resolve) => chrome.windows.create(
-                        {url, width: popupWidth, height: popupHeight, type: 'popup'},
-                        resolve
-                    ));
-                } catch (e) {
-                    // NOP
-                }
-                return;
-        }
-    }
-
-    _onCommandHelp() {
-        chrome.tabs.create({url: 'https://foosoft.net/projects/yomichan/'});
-    }
-
-    _onCommandOptions(params) {
-        const {mode='existingOrNewTab'} = params || {};
-        if (mode === 'existingOrNewTab') {
-            chrome.runtime.openOptionsPage();
-        } else if (mode === 'newTab') {
-            const manifest = chrome.runtime.getManifest();
-            const url = chrome.runtime.getURL(manifest.options_ui.page);
-            chrome.tabs.create({url});
-        }
-    }
-
-    async _onCommandToggle() {
-        const source = 'popup';
-        const options = this.getOptions(this.optionsContext);
-        options.general.enable = !options.general.enable;
-        await this._onApiOptionsSave({source});
-    }
-
-    // Utilities
 
     _getModifySettingObject(target) {
         const scope = target.scope;
@@ -1236,7 +1365,7 @@ class Backend {
     }
 
     _anyOptionsMatches(predicate) {
-        for (const {options} of this.options.profiles) {
+        for (const {options} of this._options.profiles) {
             const value = predicate(options);
             if (value) { return value; }
         }
@@ -1249,29 +1378,27 @@ class Backend {
 
     _getTemplates(options) {
         const templates = options.anki.fieldTemplates;
-        return typeof templates === 'string' ? templates : this.defaultAnkiFieldTemplates;
+        return typeof templates === 'string' ? templates : this._defaultAnkiFieldTemplates;
     }
 
-    static _getTabUrl(tab) {
+    _getTabUrl(tab) {
         return new Promise((resolve) => {
             chrome.tabs.sendMessage(tab.id, {action: 'getUrl'}, {frameId: 0}, (response) => {
                 let url = null;
-                if (!chrome.runtime.lastError) {
-                    url = (response !== null && typeof response === 'object' && !Array.isArray(response) ? response.url : null);
-                    if (url !== null && typeof url !== 'string') {
-                        url = null;
-                    }
+                try {
+                    ({url} = yomichan.getMessageResponseResult(response));
+                } catch (error) {
+                    // NOP
                 }
                 resolve({tab, url});
             });
         });
     }
 
-    static async _findTab(timeout, checkUrl) {
+    async _findTab(timeout, checkUrl) {
         // This function works around the need to have the "tabs" permission to access tab.url.
         const tabs = await new Promise((resolve) => chrome.tabs.query({}, resolve));
-        let matchPromiseResolve = null;
-        const matchPromise = new Promise((resolve) => { matchPromiseResolve = resolve; });
+        const {promise: matchPromise, resolve: matchPromiseResolve} = deferPromise();
 
         const checkTabUrl = ({tab, url}) => {
             if (checkUrl(url, tab)) {
@@ -1281,7 +1408,7 @@ class Backend {
 
         const promises = [];
         for (const tab of tabs) {
-            const promise = Backend._getTabUrl(tab);
+            const promise = this._getTabUrl(tab);
             promise.then(checkTabUrl);
             promises.push(promise);
         }
@@ -1297,7 +1424,7 @@ class Backend {
         return await Promise.race(racePromises);
     }
 
-    static async _focusTab(tab) {
+    async _focusTab(tab) {
         await new Promise((resolve, reject) => {
             chrome.tabs.update(tab.id, {active: true}, () => {
                 const e = chrome.runtime.lastError;
@@ -1341,58 +1468,74 @@ class Backend {
             // Edge throws exception for no reason here.
         }
     }
-}
 
-class BackendEventHandler {
-    constructor(backend) {
-        this._backend = backend;
+    _waitUntilTabFrameIsReady(tabId, frameId, timeout=null) {
+        return new Promise((resolve, reject) => {
+            let timer = null;
+            let onMessage = (message, sender) => {
+                if (
+                    !sender.tab ||
+                    sender.tab.id !== tabId ||
+                    sender.frameId !== frameId ||
+                    !isObject(message) ||
+                    message.action !== 'yomichanReady'
+                ) {
+                    return;
+                }
+
+                cleanup();
+                resolve();
+            };
+            const cleanup = () => {
+                if (timer !== null) {
+                    clearTimeout(timer);
+                    timer = null;
+                }
+                if (onMessage !== null) {
+                    chrome.runtime.onMessage.removeListener(onMessage);
+                    onMessage = null;
+                }
+            };
+
+            chrome.runtime.onMessage.addListener(onMessage);
+
+            chrome.tabs.sendMessage(tabId, {action: 'isReady'}, {frameId}, (response) => {
+                const error = chrome.runtime.lastError;
+                if (error) { return; }
+
+                try {
+                    const value = yomichan.getMessageResponseResult(response);
+                    if (!value) { return; }
+
+                    cleanup();
+                    resolve();
+                } catch (e) {
+                    // NOP
+                }
+            });
+
+            if (timeout !== null) {
+                timer = setTimeout(() => {
+                    timer = null;
+                    cleanup();
+                    reject(new Error('Timeout'));
+                }, timeout);
+            }
+        });
     }
 
-    prepare() {
-        if (isObject(chrome.commands) && isObject(chrome.commands.onCommand)) {
-            const onCommand = this._createGenericEventHandler((...args) => this._backend.handleCommand(...args));
-            chrome.commands.onCommand.addListener(onCommand);
+    async _fetchAsset(url, json=false) {
+        const response = await fetch(chrome.runtime.getURL(url), {
+            method: 'GET',
+            mode: 'no-cors',
+            cache: 'default',
+            credentials: 'omit',
+            redirect: 'follow',
+            referrerPolicy: 'no-referrer'
+        });
+        if (!response.ok) {
+            throw new Error(`Failed to fetch ${url}: ${response.status}`);
         }
-
-        if (isObject(chrome.tabs) && isObject(chrome.tabs.onZoomChange)) {
-            const onZoomChange = this._createGenericEventHandler((...args) => this._backend.handleZoomChange(...args));
-            chrome.tabs.onZoomChange.addListener(onZoomChange);
-        }
-
-        const onConnect = this._createGenericEventHandler((...args) => this._backend.handleConnect(...args));
-        chrome.runtime.onConnect.addListener(onConnect);
-
-        const onMessage = this._onMessage.bind(this);
-        chrome.runtime.onMessage.addListener(onMessage);
-    }
-
-    // Event handlers
-
-    _createGenericEventHandler(handler) {
-        return this._onGenericEvent.bind(this, handler);
-    }
-
-    _onGenericEvent(handler, ...args) {
-        if (this._backend.isPrepared()) {
-            handler(...args);
-            return;
-        }
-
-        this._backend.prepareComplete().then(
-            () => { handler(...args); },
-            () => {} // NOP
-        );
-    }
-
-    _onMessage(message, sender, sendResponse) {
-        if (this._backend.isPrepared()) {
-            return this._backend.handleMessage(message, sender, sendResponse);
-        }
-
-        this._backend.prepareComplete().then(
-            () => { this._backend.handleMessage(message, sender, sendResponse); },
-            () => { sendResponse(); } // NOP
-        );
-        return true;
+        return await (json ? response.json() : response.text());
     }
 }

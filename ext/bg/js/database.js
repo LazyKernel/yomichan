@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2020  Yomichan Authors
+ * Copyright (C) 2020  Yomichan Authors
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,460 +15,313 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* global
- * GenericDatabase
- * dictFieldSplit
- */
-
 class Database {
     constructor() {
-        this._db = new GenericDatabase();
-        this._dbName = 'dict';
-        this._schemas = new Map();
+        this._db = null;
+        this._isOpening = false;
     }
 
     // Public
 
-    async prepare() {
-        await this._db.open(
-            this._dbName,
-            60,
-            [
-                {
-                    version: 20,
-                    stores: {
-                        terms: {
-                            primaryKey: {keyPath: 'id', autoIncrement: true},
-                            indices: ['dictionary', 'expression', 'reading']
-                        },
-                        kanji: {
-                            primaryKey: {autoIncrement: true},
-                            indices: ['dictionary', 'character']
-                        },
-                        tagMeta: {
-                            primaryKey: {autoIncrement: true},
-                            indices: ['dictionary']
-                        },
-                        dictionaries: {
-                            primaryKey: {autoIncrement: true},
-                            indices: ['title', 'version']
-                        }
-                    }
-                },
-                {
-                    version: 30,
-                    stores: {
-                        termMeta: {
-                            primaryKey: {autoIncrement: true},
-                            indices: ['dictionary', 'expression']
-                        },
-                        kanjiMeta: {
-                            primaryKey: {autoIncrement: true},
-                            indices: ['dictionary', 'character']
-                        },
-                        tagMeta: {
-                            primaryKey: {autoIncrement: true},
-                            indices: ['dictionary', 'name']
-                        }
-                    }
-                },
-                {
-                    version: 40,
-                    stores: {
-                        terms: {
-                            primaryKey: {keyPath: 'id', autoIncrement: true},
-                            indices: ['dictionary', 'expression', 'reading', 'sequence']
-                        }
-                    }
-                },
-                {
-                    version: 50,
-                    stores: {
-                        terms: {
-                            primaryKey: {keyPath: 'id', autoIncrement: true},
-                            indices: ['dictionary', 'expression', 'reading', 'sequence', 'expressionReverse', 'readingReverse']
-                        }
-                    }
-                },
-                {
-                    version: 60,
-                    stores: {
-                        media: {
-                            primaryKey: {keyPath: 'id', autoIncrement: true},
-                            indices: ['dictionary', 'path']
-                        }
-                    }
-                }
-            ]
-        );
-    }
-
-    async close() {
-        this._db.close();
-    }
-
-    isPrepared() {
-        return this._db.isOpen();
-    }
-
-    async purge() {
-        if (this._db.isOpening()) {
-            throw new Error('Cannot purge database while opening');
+    async open(databaseName, version, structure) {
+        if (this._db !== null) {
+            throw new Error('Database already open');
         }
-        if (this._db.isOpen()) {
-            this._db.close();
+        if (this._isOpening) {
+            throw new Error('Already opening');
         }
-        await GenericDatabase.deleteDatabase(this._dbName);
-        await this.prepare();
-    }
 
-    async deleteDictionary(dictionaryName, progressSettings, onProgress) {
-        const targets = [
-            ['dictionaries', 'title'],
-            ['kanji', 'dictionary'],
-            ['kanjiMeta', 'dictionary'],
-            ['terms', 'dictionary'],
-            ['termMeta', 'dictionary'],
-            ['tagMeta', 'dictionary'],
-            ['media', 'dictionary']
-        ];
-
-        const {rate} = progressSettings;
-        const progressData = {
-            count: 0,
-            processed: 0,
-            storeCount: targets.length,
-            storesProcesed: 0
-        };
-
-        const filterKeys = (keys) => {
-            ++progressData.storesProcesed;
-            progressData.count += keys.length;
-            onProgress(progressData);
-            return keys;
-        };
-        const onProgress2 = () => {
-            const processed = progressData.processed + 1;
-            progressData.processed = processed;
-            if ((processed % rate) === 0 || processed === progressData.count) {
-                onProgress(progressData);
-            }
-        };
-
-        const promises = [];
-        for (const [objectStoreName, indexName] of targets) {
-            const query = IDBKeyRange.only(dictionaryName);
-            const promise = this._db.bulkDelete(objectStoreName, indexName, query, filterKeys, onProgress2);
-            promises.push(promise);
-        }
-        await Promise.all(promises);
-    }
-
-    findTermsBulk(termList, dictionaries, wildcard) {
-        return new Promise((resolve, reject) => {
-            const results = [];
-            const count = termList.length;
-            if (count === 0) {
-                resolve(results);
-                return;
-            }
-
-            const visited = new Set();
-            const useWildcard = !!wildcard;
-            const prefixWildcard = wildcard === 'prefix';
-
-            const transaction = this._db.transaction(['terms'], 'readonly');
-            const terms = transaction.objectStore('terms');
-            const index1 = terms.index(prefixWildcard ? 'expressionReverse' : 'expression');
-            const index2 = terms.index(prefixWildcard ? 'readingReverse' : 'reading');
-
-            const count2 = count * 2;
-            let completeCount = 0;
-            for (let i = 0; i < count; ++i) {
-                const inputIndex = i;
-                const term = prefixWildcard ? stringReverse(termList[i]) : termList[i];
-                const query = useWildcard ? IDBKeyRange.bound(term, `${term}\uffff`, false, false) : IDBKeyRange.only(term);
-
-                const onGetAll = (rows) => {
-                    for (const row of rows) {
-                        if (dictionaries.has(row.dictionary) && !visited.has(row.id)) {
-                            visited.add(row.id);
-                            results.push(this._createTerm(row, inputIndex));
-                        }
-                    }
-                    if (++completeCount >= count2) {
-                        resolve(results);
-                    }
-                };
-
-                this._db.getAll(index1, query, onGetAll, reject);
-                this._db.getAll(index2, query, onGetAll, reject);
-            }
-        });
-    }
-
-    findTermsExactBulk(termList, readingList, dictionaries) {
-        return new Promise((resolve, reject) => {
-            const results = [];
-            const count = termList.length;
-            if (count === 0) {
-                resolve(results);
-                return;
-            }
-
-            const transaction = this._db.transaction(['terms'], 'readonly');
-            const terms = transaction.objectStore('terms');
-            const index = terms.index('expression');
-
-            let completeCount = 0;
-            for (let i = 0; i < count; ++i) {
-                const inputIndex = i;
-                const reading = readingList[i];
-                const query = IDBKeyRange.only(termList[i]);
-
-                const onGetAll = (rows) => {
-                    for (const row of rows) {
-                        if (row.reading === reading && dictionaries.has(row.dictionary)) {
-                            results.push(this._createTerm(row, inputIndex));
-                        }
-                    }
-                    if (++completeCount >= count) {
-                        resolve(results);
-                    }
-                };
-
-                this._db.getAll(index, query, onGetAll, reject);
-            }
-        });
-    }
-
-    findTermsBySequenceBulk(sequenceList, mainDictionary) {
-        return new Promise((resolve, reject) => {
-            const results = [];
-            const count = sequenceList.length;
-            if (count === 0) {
-                resolve(results);
-                return;
-            }
-
-            const transaction = this._db.transaction(['terms'], 'readonly');
-            const terms = transaction.objectStore('terms');
-            const index = terms.index('sequence');
-
-            let completeCount = 0;
-            for (let i = 0; i < count; ++i) {
-                const inputIndex = i;
-                const query = IDBKeyRange.only(sequenceList[i]);
-
-                const onGetAll = (rows) => {
-                    for (const row of rows) {
-                        if (row.dictionary === mainDictionary) {
-                            results.push(this._createTerm(row, inputIndex));
-                        }
-                    }
-                    if (++completeCount >= count) {
-                        resolve(results);
-                    }
-                };
-
-                this._db.getAll(index, query, onGetAll, reject);
-            }
-        });
-    }
-
-    findTermMetaBulk(termList, dictionaries) {
-        return this._findGenericBulk('termMeta', 'expression', termList, dictionaries, this._createTermMeta.bind(this));
-    }
-
-    findKanjiBulk(kanjiList, dictionaries) {
-        return this._findGenericBulk('kanji', 'character', kanjiList, dictionaries, this._createKanji.bind(this));
-    }
-
-    findKanjiMetaBulk(kanjiList, dictionaries) {
-        return this._findGenericBulk('kanjiMeta', 'character', kanjiList, dictionaries, this._createKanjiMeta.bind(this));
-    }
-
-    findTagForTitle(name, title) {
-        const query = IDBKeyRange.only(name);
-        return this._db.find('tagMeta', 'name', query, (row) => (row.dictionary === title), null);
-    }
-
-    getMedia(targets) {
-        return new Promise((resolve, reject) => {
-            const count = targets.length;
-            const results = new Array(count).fill(null);
-            if (count === 0) {
-                resolve(results);
-                return;
-            }
-
-            let completeCount = 0;
-            const transaction = this._db.transaction(['media'], 'readonly');
-            const objectStore = transaction.objectStore('media');
-            const index = objectStore.index('path');
-
-            for (let i = 0; i < count; ++i) {
-                const inputIndex = i;
-                const {path, dictionaryName} = targets[i];
-                const query = IDBKeyRange.only(path);
-
-                const onGetAll = (rows) => {
-                    for (const row of rows) {
-                        if (row.dictionary !== dictionaryName) { continue; }
-                        results[inputIndex] = this._createMedia(row, inputIndex);
-                    }
-                    if (++completeCount >= count) {
-                        resolve(results);
-                    }
-                };
-
-                this._db.getAll(index, query, onGetAll, reject);
-            }
-        });
-    }
-
-    getDictionaryInfo() {
-        return new Promise((resolve, reject) => {
-            const transaction = this._db.transaction(['dictionaries'], 'readonly');
-            const objectStore = transaction.objectStore('dictionaries');
-            this._db.getAll(objectStore, null, resolve, reject);
-        });
-    }
-
-    getDictionaryCounts(dictionaryNames, getTotal) {
-        return new Promise((resolve, reject) => {
-            const targets = [
-                ['kanji', 'dictionary'],
-                ['kanjiMeta', 'dictionary'],
-                ['terms', 'dictionary'],
-                ['termMeta', 'dictionary'],
-                ['tagMeta', 'dictionary'],
-                ['media', 'dictionary']
-            ];
-            const objectStoreNames = targets.map(([objectStoreName]) => objectStoreName);
-            const transaction = this._db.transaction(objectStoreNames, 'readonly');
-            const databaseTargets = targets.map(([objectStoreName, indexName]) => {
-                const objectStore = transaction.objectStore(objectStoreName);
-                const index = objectStore.index(indexName);
-                return {objectStore, index};
+        try {
+            this._isOpening = true;
+            this._db = await this._open(databaseName, version, (db, transaction, oldVersion) => {
+                this._upgrade(db, transaction, oldVersion, structure);
             });
-
-            const countTargets = [];
-            if (getTotal) {
-                for (const {objectStore} of databaseTargets) {
-                    countTargets.push([objectStore, null]);
-                }
-            }
-            for (const dictionaryName of dictionaryNames) {
-                const query = IDBKeyRange.only(dictionaryName);
-                for (const {index} of databaseTargets) {
-                    countTargets.push([index, query]);
-                }
-            }
-
-            const onCountComplete = (results) => {
-                const resultCount = results.length;
-                const targetCount = targets.length;
-                const counts = [];
-                for (let i = 0; i < resultCount; i += targetCount) {
-                    const countGroup = {};
-                    for (let j = 0; j < targetCount; ++j) {
-                        countGroup[targets[j][0]] = results[i + j];
-                    }
-                    counts.push(countGroup);
-                }
-                const total = getTotal ? counts.shift() : null;
-                resolve({total, counts});
-            };
-
-            this._db.bulkCount(countTargets, onCountComplete, reject);
-        });
+        } finally {
+            this._isOpening = false;
+        }
     }
 
-    async dictionaryExists(title) {
-        const query = IDBKeyRange.only(title);
-        const result = await this._db.find('dictionaries', 'title', query);
-        return typeof result !== 'undefined';
+    close() {
+        if (this._db === null) {
+            throw new Error('Database is not open');
+        }
+
+        this._db.close();
+        this._db = null;
+    }
+
+    isOpening() {
+        return this._isOpening;
+    }
+
+    isOpen() {
+        return this._db !== null;
+    }
+
+    transaction(storeNames, mode) {
+        if (this._db === null) {
+            throw new Error(this._isOpening ? 'Database not ready' : 'Database not open');
+        }
+        return this._db.transaction(storeNames, mode);
     }
 
     bulkAdd(objectStoreName, items, start, count) {
-        return this._db.bulkAdd(objectStoreName, items, start, count);
+        return new Promise((resolve, reject) => {
+            if (start + count > items.length) {
+                count = items.length - start;
+            }
+
+            if (count <= 0) {
+                resolve();
+                return;
+            }
+
+            const end = start + count;
+            let completedCount = 0;
+            const onError = (e) => reject(e.target.error);
+            const onSuccess = () => {
+                if (++completedCount >= count) {
+                    resolve();
+                }
+            };
+
+            const transaction = this.transaction([objectStoreName], 'readwrite');
+            const objectStore = transaction.objectStore(objectStoreName);
+            for (let i = start; i < end; ++i) {
+                const request = objectStore.add(items[i]);
+                request.onerror = onError;
+                request.onsuccess = onSuccess;
+            }
+        });
+    }
+
+    getAll(objectStoreOrIndex, query, resolve, reject) {
+        if (typeof objectStoreOrIndex.getAll === 'function') {
+            this._getAllFast(objectStoreOrIndex, query, resolve, reject);
+        } else {
+            this._getAllUsingCursor(objectStoreOrIndex, query, resolve, reject);
+        }
+    }
+
+    getAllKeys(objectStoreOrIndex, query, resolve, reject) {
+        if (typeof objectStoreOrIndex.getAll === 'function') {
+            this._getAllKeysFast(objectStoreOrIndex, query, resolve, reject);
+        } else {
+            this._getAllKeysUsingCursor(objectStoreOrIndex, query, resolve, reject);
+        }
+    }
+
+    find(objectStoreName, indexName, query, predicate=null, defaultValue) {
+        return new Promise((resolve, reject) => {
+            const transaction = this.transaction([objectStoreName], 'readonly');
+            const objectStore = transaction.objectStore(objectStoreName);
+            const objectStoreOrIndex = indexName !== null ? objectStore.index(indexName) : objectStore;
+            const request = objectStoreOrIndex.openCursor(query, 'next');
+            request.onerror = (e) => reject(e.target.error);
+            request.onsuccess = (e) => {
+                const cursor = e.target.result;
+                if (cursor) {
+                    const value = cursor.value;
+                    if (typeof predicate !== 'function' || predicate(value)) {
+                        resolve(value);
+                    } else {
+                        cursor.continue();
+                    }
+                } else {
+                    resolve(defaultValue);
+                }
+            };
+        });
+    }
+
+    bulkCount(targets, resolve, reject) {
+        const targetCount = targets.length;
+        if (targetCount <= 0) {
+            resolve();
+            return;
+        }
+
+        let completedCount = 0;
+        const results = new Array(targetCount).fill(null);
+
+        const onError = (e) => reject(e.target.error);
+        const onSuccess = (e, index) => {
+            const count = e.target.result;
+            results[index] = count;
+            if (++completedCount >= targetCount) {
+                resolve(results);
+            }
+        };
+
+        for (let i = 0; i < targetCount; ++i) {
+            const index = i;
+            const [objectStoreOrIndex, query] = targets[i];
+            const request = objectStoreOrIndex.count(query);
+            request.onerror = onError;
+            request.onsuccess = (e) => onSuccess(e, index);
+        }
+    }
+
+    delete(objectStoreName, key) {
+        return new Promise((resolve, reject) => {
+            const transaction = this.transaction([objectStoreName], 'readwrite');
+            const objectStore = transaction.objectStore(objectStoreName);
+            const request = objectStore.delete(key);
+            request.onerror = (e) => reject(e.target.error);
+            request.onsuccess = () => resolve();
+        });
+    }
+
+    bulkDelete(objectStoreName, indexName, query, filterKeys=null, onProgress=null) {
+        return new Promise((resolve, reject) => {
+            const transaction = this.transaction([objectStoreName], 'readwrite');
+            const objectStore = transaction.objectStore(objectStoreName);
+            const objectStoreOrIndex = indexName !== null ? objectStore.index(indexName) : objectStore;
+
+            const onGetKeys = (keys) => {
+                try {
+                    if (typeof filterKeys === 'function') {
+                        keys = filterKeys(keys);
+                    }
+                    this._bulkDeleteInternal(objectStore, keys, onProgress, resolve, reject);
+                } catch (e) {
+                    reject(e);
+                }
+            };
+
+            this.getAllKeys(objectStoreOrIndex, query, onGetKeys, reject);
+        });
+    }
+
+    static deleteDatabase(databaseName) {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.deleteDatabase(databaseName);
+            request.onerror = (e) => reject(e.target.error);
+            request.onsuccess = () => resolve();
+            request.onblocked = () => reject(new Error('Database deletion blocked'));
+        });
     }
 
     // Private
 
-    async _findGenericBulk(objectStoreName, indexName, indexValueList, dictionaries, createResult) {
+    _open(name, version, onUpgradeNeeded) {
         return new Promise((resolve, reject) => {
-            const results = [];
-            const count = indexValueList.length;
-            if (count === 0) {
-                resolve(results);
-                return;
-            }
+            const request = indexedDB.open(name, version);
 
-            const transaction = this._db.transaction([objectStoreName], 'readonly');
-            const terms = transaction.objectStore(objectStoreName);
-            const index = terms.index(indexName);
+            request.onupgradeneeded = (event) => {
+                try {
+                    request.transaction.onerror = (e) => reject(e.target.error);
+                    onUpgradeNeeded(request.result, request.transaction, event.oldVersion, event.newVersion);
+                } catch (e) {
+                    reject(e);
+                }
+            };
 
-            let completeCount = 0;
-            for (let i = 0; i < count; ++i) {
-                const inputIndex = i;
-                const query = IDBKeyRange.only(indexValueList[i]);
-
-                const onGetAll = (rows) => {
-                    for (const row of rows) {
-                        if (dictionaries.has(row.dictionary)) {
-                            results.push(createResult(row, inputIndex));
-                        }
-                    }
-                    if (++completeCount >= count) {
-                        resolve(results);
-                    }
-                };
-
-                this._db.getAll(index, query, onGetAll, reject);
-            }
+            request.onerror = (e) => reject(e.target.error);
+            request.onsuccess = () => resolve(request.result);
         });
     }
 
-    _createTerm(row, index) {
-        return {
-            index,
-            expression: row.expression,
-            reading: row.reading,
-            definitionTags: dictFieldSplit(row.definitionTags || row.tags || ''),
-            termTags: dictFieldSplit(row.termTags || ''),
-            rules: dictFieldSplit(row.rules),
-            glossary: row.glossary,
-            score: row.score,
-            dictionary: row.dictionary,
-            id: row.id,
-            sequence: typeof row.sequence === 'undefined' ? -1 : row.sequence
+    _upgrade(db, transaction, oldVersion, upgrades) {
+        for (const {version, stores} of upgrades) {
+            if (oldVersion >= version) { continue; }
+
+            for (const [objectStoreName, {primaryKey, indices}] of Object.entries(stores)) {
+                const existingObjectStoreNames = transaction.objectStoreNames || db.objectStoreNames;
+                const objectStore = (
+                    this._listContains(existingObjectStoreNames, objectStoreName) ?
+                    transaction.objectStore(objectStoreName) :
+                    db.createObjectStore(objectStoreName, primaryKey)
+                );
+                const existingIndexNames = objectStore.indexNames;
+
+                for (const indexName of indices) {
+                    if (this._listContains(existingIndexNames, indexName)) { continue; }
+
+                    objectStore.createIndex(indexName, indexName, {});
+                }
+            }
+        }
+    }
+
+    _listContains(list, value) {
+        for (let i = 0, ii = list.length; i < ii; ++i) {
+            if (list[i] === value) { return true; }
+        }
+        return false;
+    }
+
+    _getAllFast(objectStoreOrIndex, query, resolve, reject) {
+        const request = objectStoreOrIndex.getAll(query);
+        request.onerror = (e) => reject(e.target.error);
+        request.onsuccess = (e) => resolve(e.target.result);
+    }
+
+    _getAllUsingCursor(objectStoreOrIndex, query, resolve, reject) {
+        const results = [];
+        const request = objectStoreOrIndex.openCursor(query, 'next');
+        request.onerror = (e) => reject(e.target.error);
+        request.onsuccess = (e) => {
+            const cursor = e.target.result;
+            if (cursor) {
+                results.push(cursor.value);
+                cursor.continue();
+            } else {
+                resolve(results);
+            }
         };
     }
 
-    _createKanji(row, index) {
-        return {
-            index,
-            character: row.character,
-            onyomi: dictFieldSplit(row.onyomi),
-            kunyomi: dictFieldSplit(row.kunyomi),
-            tags: dictFieldSplit(row.tags),
-            glossary: row.meanings,
-            stats: row.stats,
-            dictionary: row.dictionary
+    _getAllKeysFast(objectStoreOrIndex, query, resolve, reject) {
+        const request = objectStoreOrIndex.getAllKeys(query);
+        request.onerror = (e) => reject(e.target.error);
+        request.onsuccess = (e) => resolve(e.target.result);
+    }
+
+    _getAllKeysUsingCursor(objectStoreOrIndex, query, resolve, reject) {
+        const results = [];
+        const request = objectStoreOrIndex.openKeyCursor(query, 'next');
+        request.onerror = (e) => reject(e.target.error);
+        request.onsuccess = (e) => {
+            const cursor = e.target.result;
+            if (cursor) {
+                results.push(cursor.primaryKey);
+                cursor.continue();
+            } else {
+                resolve(results);
+            }
         };
     }
 
-    _createTermMeta({expression, mode, data, dictionary}, index) {
-        return {expression, mode, data, dictionary, index};
-    }
+    _bulkDeleteInternal(objectStore, keys, onProgress, resolve, reject) {
+        const count = keys.length;
+        if (count === 0) {
+            resolve();
+            return;
+        }
 
-    _createKanjiMeta({character, mode, data, dictionary}, index) {
-        return {character, mode, data, dictionary, index};
-    }
+        let completedCount = 0;
+        const hasProgress = (typeof onProgress === 'function');
 
-    _createMedia(row, index) {
-        return Object.assign({}, row, {index});
+        const onError = (e) => reject(e.target.error);
+        const onSuccess = () => {
+            ++completedCount;
+            if (hasProgress) {
+                try {
+                    onProgress(completedCount, count);
+                } catch (e) {
+                    // NOP
+                }
+            }
+            if (completedCount >= count) {
+                resolve();
+            }
+        };
+
+        for (const key of keys) {
+            const request = objectStore.delete(key);
+            request.onerror = onError;
+            request.onsuccess = onSuccess;
+        }
     }
 }

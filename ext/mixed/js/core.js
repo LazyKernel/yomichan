@@ -15,38 +15,6 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-
-/*
- * Extension information
- */
-
-function _extensionHasChrome() {
-    try {
-        return typeof chrome === 'object' && chrome !== null;
-    } catch (e) {
-        return false;
-    }
-}
-
-function _extensionHasBrowser() {
-    try {
-        return typeof browser === 'object' && browser !== null;
-    } catch (e) {
-        return false;
-    }
-}
-
-const EXTENSION_IS_BROWSER_EDGE = (
-    _extensionHasBrowser() &&
-    (!_extensionHasChrome() || (typeof chrome.runtime === 'undefined' && typeof browser.runtime !== 'undefined'))
-);
-
-if (EXTENSION_IS_BROWSER_EDGE) {
-    // Edge does not have chrome defined.
-    chrome = browser;
-}
-
-
 /*
  * Error handling
  */
@@ -157,10 +125,92 @@ function getSetDifference(set1, set2) {
     );
 }
 
+const clone = (() => {
+    // eslint-disable-next-line no-shadow
+    function clone(value) {
+        if (value === null) { return null; }
+        switch (typeof value) {
+            case 'boolean':
+            case 'number':
+            case 'string':
+            case 'bigint':
+            case 'symbol':
+            case 'undefined':
+                return value;
+            default:
+                return cloneInternal(value, new Set());
+        }
+    }
+
+    function cloneInternal(value, visited) {
+        if (value === null) { return null; }
+        switch (typeof value) {
+            case 'boolean':
+            case 'number':
+            case 'string':
+            case 'bigint':
+            case 'symbol':
+            case 'undefined':
+                return value;
+            case 'function':
+                return cloneObject(value, visited);
+            case 'object':
+                return Array.isArray(value) ? cloneArray(value, visited) : cloneObject(value, visited);
+        }
+    }
+
+    function cloneArray(value, visited) {
+        if (visited.has(value)) { throw new Error('Circular'); }
+        try {
+            visited.add(value);
+            const result = [];
+            for (const item of value) {
+                result.push(cloneInternal(item, visited));
+            }
+            return result;
+        } finally {
+            visited.delete(value);
+        }
+    }
+
+    function cloneObject(value, visited) {
+        if (visited.has(value)) { throw new Error('Circular'); }
+        try {
+            visited.add(value);
+            const result = {};
+            for (const key in value) {
+                if (Object.prototype.hasOwnProperty.call(value, key)) {
+                    result[key] = cloneInternal(value[key], visited);
+                }
+            }
+            return result;
+        } finally {
+            visited.delete(value);
+        }
+    }
+
+    return clone;
+})();
+
+// Expose clone function on the global object, since util.js's utilBackgroundIsolate needs access to it.
+if (typeof window === 'object' && window !== null) {
+    window.clone = clone;
+}
+
 
 /*
  * Async utilities
  */
+
+function deferPromise() {
+    let resolve;
+    let reject;
+    const promise = new Promise((resolve2, reject2) => {
+        resolve = resolve2;
+        reject = reject2;
+    });
+    return {promise, resolve, reject};
+}
 
 function promiseTimeout(delay, resolveValue) {
     if (delay <= 0) {
@@ -171,8 +221,7 @@ function promiseTimeout(delay, resolveValue) {
     }
 
     let timer = null;
-    let promiseResolve = null;
-    let promiseReject = null;
+    let {promise, resolve, reject} = deferPromise();
 
     const complete = (callback, value) => {
         if (callback === null) { return; }
@@ -180,25 +229,21 @@ function promiseTimeout(delay, resolveValue) {
             clearTimeout(timer);
             timer = null;
         }
-        promiseResolve = null;
-        promiseReject = null;
+        resolve = null;
+        reject = null;
         callback(value);
     };
 
-    const resolve = (value) => complete(promiseResolve, value);
-    const reject = (value) => complete(promiseReject, value);
+    const resolveWrapper = (value) => complete(resolve, value);
+    const rejectWrapper = (value) => complete(reject, value);
 
-    const promise = new Promise((resolve2, reject2) => {
-        promiseResolve = resolve2;
-        promiseReject = reject2;
-    });
     timer = setTimeout(() => {
         timer = null;
-        resolve(resolveValue);
+        resolveWrapper(resolveValue);
     }, delay);
 
-    promise.resolve = resolve;
-    promise.reject = reject;
+    promise.resolve = resolveWrapper;
+    promise.reject = rejectWrapper;
 
     return promise;
 }
@@ -293,195 +338,3 @@ class EventListenerCollection {
         this._eventListeners = [];
     }
 }
-
-
-/*
- * Default message handlers
- */
-
-const yomichan = (() => {
-    class Yomichan extends EventDispatcher {
-        constructor() {
-            super();
-
-            this._isBackendPreparedPromise = this.getTemporaryListenerResult(
-                chrome.runtime.onMessage,
-                ({action}, {resolve}) => {
-                    if (action === 'backendPrepared') {
-                        resolve();
-                    }
-                }
-            );
-
-            this._messageHandlers = new Map([
-                ['getUrl', this._onMessageGetUrl.bind(this)],
-                ['optionsUpdated', this._onMessageOptionsUpdated.bind(this)],
-                ['zoomChanged', this._onMessageZoomChanged.bind(this)]
-            ]);
-
-            chrome.runtime.onMessage.addListener(this._onMessage.bind(this));
-        }
-
-        // Public
-
-        prepare() {
-            chrome.runtime.sendMessage({action: 'yomichanCoreReady'});
-            return this._isBackendPreparedPromise;
-        }
-
-        generateId(length) {
-            const array = new Uint8Array(length);
-            crypto.getRandomValues(array);
-            let id = '';
-            for (const value of array) {
-                id += value.toString(16).padStart(2, '0');
-            }
-            return id;
-        }
-
-        triggerOrphaned(error) {
-            this.trigger('orphaned', {error});
-        }
-
-        isExtensionUrl(url) {
-            try {
-                const urlBase = chrome.runtime.getURL('/');
-                return url.substring(0, urlBase.length) === urlBase;
-            } catch (e) {
-                return false;
-            }
-        }
-
-        getTemporaryListenerResult(eventHandler, userCallback, timeout=null) {
-            if (!(
-                typeof eventHandler.addListener === 'function' &&
-                typeof eventHandler.removeListener === 'function'
-            )) {
-                throw new Error('Event handler type not supported');
-            }
-
-            return new Promise((resolve, reject) => {
-                const runtimeMessageCallback = ({action, params}, sender, sendResponse) => {
-                    let timeoutId = null;
-                    if (timeout !== null) {
-                        timeoutId = setTimeout(() => {
-                            timeoutId = null;
-                            eventHandler.removeListener(runtimeMessageCallback);
-                            reject(new Error(`Listener timed out in ${timeout} ms`));
-                        }, timeout);
-                    }
-
-                    const cleanupResolve = (value) => {
-                        if (timeoutId !== null) {
-                            clearTimeout(timeoutId);
-                            timeoutId = null;
-                        }
-                        eventHandler.removeListener(runtimeMessageCallback);
-                        sendResponse();
-                        resolve(value);
-                    };
-
-                    userCallback({action, params}, {resolve: cleanupResolve, sender});
-                };
-
-                eventHandler.addListener(runtimeMessageCallback);
-            });
-        }
-
-        logWarning(error) {
-            this.log(error, 'warn');
-        }
-
-        logError(error) {
-            this.log(error, 'error');
-        }
-
-        log(error, level, context=null) {
-            if (!isObject(context)) {
-                context = this._getLogContext();
-            }
-
-            let errorString;
-            try {
-                errorString = error.toString();
-                if (/^\[object \w+\]$/.test(errorString)) {
-                    errorString = JSON.stringify(error);
-                }
-            } catch (e) {
-                errorString = `${error}`;
-            }
-
-            let errorStack;
-            try {
-                errorStack = (typeof error.stack === 'string' ? error.stack.trimRight() : '');
-            } catch (e) {
-                errorStack = '';
-            }
-
-            let errorData;
-            try {
-                errorData = error.data;
-            } catch (e) {
-                // NOP
-            }
-
-            if (errorStack.startsWith(errorString)) {
-                errorString = errorStack;
-            } else if (errorStack.length > 0) {
-                errorString += `\n${errorStack}`;
-            }
-
-            const manifest = chrome.runtime.getManifest();
-            let message = `${manifest.name} v${manifest.version} has encountered a problem.`;
-            message += `\nOriginating URL: ${context.url}\n`;
-            message += errorString;
-            if (typeof errorData !== 'undefined') {
-                message += `\nData: ${JSON.stringify(errorData, null, 4)}`;
-            }
-            message += '\n\nIssues can be reported at https://github.com/FooSoft/yomichan/issues';
-
-            switch (level) {
-                case 'info': console.info(message); break;
-                case 'debug': console.debug(message); break;
-                case 'warn': console.warn(message); break;
-                case 'error': console.error(message); break;
-                default: console.log(message); break;
-            }
-
-            this.trigger('log', {error, level, context});
-        }
-
-        // Private
-
-        _getUrl() {
-            return (typeof window === 'object' && window !== null ? window.location.href : '');
-        }
-
-        _getLogContext() {
-            return {url: this._getUrl()};
-        }
-
-        _onMessage({action, params}, sender, callback) {
-            const handler = this._messageHandlers.get(action);
-            if (typeof handler !== 'function') { return false; }
-
-            const result = handler(params, sender);
-            callback(result);
-            return false;
-        }
-
-        _onMessageGetUrl() {
-            return {url: this._getUrl()};
-        }
-
-        _onMessageOptionsUpdated({source}) {
-            this.trigger('optionsUpdated', {source});
-        }
-
-        _onMessageZoomChanged({oldZoomFactor, newZoomFactor}) {
-            this.trigger('zoomChanged', {oldZoomFactor, newZoomFactor});
-        }
-    }
-
-    return new Yomichan();
-})();

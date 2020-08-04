@@ -23,10 +23,12 @@
 (async () => {
     try {
         api.forwardLogsToBackend();
-        await yomichan.prepare();
+        await yomichan.backendReady();
 
         const displaySearch = new DisplaySearch();
         await displaySearch.prepare();
+
+        yomichan.ready();
     } catch (e) {
         yomichan.logError(e);
     }

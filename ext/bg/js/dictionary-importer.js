@@ -19,7 +19,6 @@
  * JSZip
  * JsonSchema
  * mediaUtility
- * requestJson
  */
 
 class DictionaryImporter {
@@ -27,11 +26,11 @@ class DictionaryImporter {
         this._schemas = new Map();
     }
 
-    async import(database, archiveSource, details, onProgress) {
-        if (!database) {
+    async importDictionary(dictionaryDatabase, archiveSource, details, onProgress) {
+        if (!dictionaryDatabase) {
             throw new Error('Invalid database');
         }
-        if (!database.isPrepared()) {
+        if (!dictionaryDatabase.isPrepared()) {
             throw new Error('Database is not ready');
         }
 
@@ -60,7 +59,7 @@ class DictionaryImporter {
         }
 
         // Verify database is not already imported
-        if (await database.dictionaryExists(dictionaryTitle)) {
+        if (await dictionaryDatabase.dictionaryExists(dictionaryTitle)) {
             throw new Error('Dictionary is already imported');
         }
 
@@ -168,7 +167,7 @@ class DictionaryImporter {
         // Add dictionary
         const summary = this._createSummary(dictionaryTitle, version, index, {prefixWildcardsSupported});
 
-        database.bulkAdd('dictionaries', [summary], 0, 1);
+        dictionaryDatabase.bulkAdd('dictionaries', [summary], 0, 1);
 
         // Add data
         const errors = [];
@@ -188,7 +187,7 @@ class DictionaryImporter {
                 const count = Math.min(maxTransactionLength, ii - i);
 
                 try {
-                    await database.bulkAdd(objectStoreName, entries, i, count);
+                    await dictionaryDatabase.bulkAdd(objectStoreName, entries, i, count);
                 } catch (e) {
                     errors.push(errorToJson(e));
                 }
@@ -235,7 +234,7 @@ class DictionaryImporter {
             return schemaPromise;
         }
 
-        schemaPromise = requestJson(chrome.runtime.getURL(fileName), 'GET');
+        schemaPromise = this._fetchJsonAsset(fileName);
         this._schemas.set(fileName, schemaPromise);
         return schemaPromise;
     }
@@ -364,5 +363,20 @@ class DictionaryImporter {
         if (typeof pixelated === 'boolean') { newData.pixelated = pixelated; }
 
         return newData;
+    }
+
+    async _fetchJsonAsset(url) {
+        const response = await fetch(chrome.runtime.getURL(url), {
+            method: 'GET',
+            mode: 'no-cors',
+            cache: 'default',
+            credentials: 'omit',
+            redirect: 'follow',
+            referrerPolicy: 'no-referrer'
+        });
+        if (!response.ok) {
+            throw new Error(`Failed to fetch ${url}: ${response.status}`);
+        }
+        return await response.json();
     }
 }
