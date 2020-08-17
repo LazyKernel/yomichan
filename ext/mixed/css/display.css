@@ -300,6 +300,9 @@ button.action-button {
 .action-button[data-icon=add-term-kana]:before {
     background-image: url("/mixed/img/add-term-kana.svg");
 }
+.action-button[data-icon=koruru-add]:before {
+    background-image: url("/mixed/img/koruru-add.ico");
+}
 .action-button[data-icon=play-audio]:before {
     background-image: url("/mixed/img/play-audio.svg");
 }

@@ -97,7 +97,7 @@ class Display extends EventDispatcher {
             ['addNoteTermKanji', () => { this._noteTryAdd('term-kanji'); }],
             ['addNoteTermKana',  () => { this._noteTryAdd('term-kana'); }],
             ['viewNote',         () => { this._noteTryView(); }],
-            ['playAudio',        () => { this._playAudioCurrent(); }]
+            ['playAudio',        () => { this._playAudioCurrent(); }],
         ]);
         this.registerHotkeys([
             {key: 'Escape',    modifiers: [],      action: 'close'},
@@ -669,6 +669,15 @@ class Display extends EventDispatcher {
         api.noteView(link.dataset.noteId);
     }
 
+    _onKoruruAdd(e) {
+        e.preventDefault();
+        const link = e.currentTarget;
+        const index = this._entryIndexFind(link);
+        if (index < 0 || index >= this._definitions.length) { return; }
+
+        this._koruruAdd(this._definitions[index], link.dataset.mode);
+    }
+
     _onWheel(e) {
         if (e.altKey) {
             if (e.deltaY !== 0) {
@@ -743,6 +752,7 @@ class Display extends EventDispatcher {
             this.addMultipleEventListeners('.action-view-note', 'click', this._onNoteView.bind(this));
             this.addMultipleEventListeners('.action-play-audio', 'click', this._onAudioPlay.bind(this));
             this.addMultipleEventListeners('.kanji-link', 'click', this._onKanjiLookup.bind(this));
+            this.addMultipleEventListeners('.action-koruru-add', 'click', this._onKoruruAdd.bind(this));
             if (this._options !== null && this._options.scanning.enablePopupSearch) {
                 this.addMultipleEventListeners('.term-glossary-item, .tag', 'mouseup', this._onGlossaryMouseUp.bind(this));
                 this.addMultipleEventListeners('.term-glossary-item, .tag', 'mousedown', this._onGlossaryMouseDown.bind(this));
@@ -1048,6 +1058,18 @@ class Display extends EventDispatcher {
             } else {
                 throw new Error('Note could not be added');
             }
+        } catch (e) {
+            this.onError(e);
+        } finally {
+            this.setSpinnerVisible(false);
+        }
+    }
+
+    async _koruruAdd(definition, mode) {
+        try {
+            this.setSpinnerVisible(true);
+            const noteContext = await this._getNoteContext();
+            const noteId = await api.koruruDefinitionAdd(definition, mode, noteContext, this.getOptionsContext());
         } catch (e) {
             this.onError(e);
         } finally {

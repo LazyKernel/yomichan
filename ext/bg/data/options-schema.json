@@ -68,7 +68,8 @@
                             "translation",
                             "dictionaries",
                             "parsing",
-                            "anki"
+                            "anki",
+                            "koruru"
                         ],
                         "properties": {
                             "version": {
@@ -611,6 +612,18 @@
                                     "fieldTemplates": {
                                         "type": ["string", "null"],
                                         "default": null
+                                    }
+                                }
+                            },
+                            "koruru": {
+                                "type": "object",
+                                "required": [
+                                    "decktoken"
+                                ],
+                                "properties": {
+                                    "decktoken": {
+                                        "type": "string",
+                                        "default": ""
                                     }
                                 }
                             }

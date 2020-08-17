@@ -24,6 +24,7 @@
  * DictionaryDatabase
  * DictionaryImporter
  * Environment
+ * Koruru
  * JsonSchemaValidator
  * Mecab
  * ObjectPropertyAccessor
@@ -44,6 +45,7 @@ class Backend {
         this._dictionaryImporter = new DictionaryImporter();
         this._translator = new Translator(this._dictionaryDatabase);
         this._anki = new AnkiConnect();
+        this._koruru = new Koruru();
         this._mecab = new Mecab();
         this._clipboardMonitor = new ClipboardMonitor({getClipboard: this._onApiClipboardGet.bind(this)});
         this._options = null;
@@ -97,6 +99,7 @@ class Backend {
             ['termsFind',                    {async: true,  contentScript: true,  handler: this._onApiTermsFind.bind(this)}],
             ['textParse',                    {async: true,  contentScript: true,  handler: this._onApiTextParse.bind(this)}],
             ['definitionAdd',                {async: true,  contentScript: true,  handler: this._onApiDefinitionAdd.bind(this)}],
+            ['koruruDefinitionAdd',          {async: true,  contentScript: true,  handler: this._onApiKoruruDefinitionAdd.bind(this)}],
             ['definitionsAddable',           {async: true,  contentScript: true,  handler: this._onApiDefinitionsAddable.bind(this)}],
             ['noteView',                     {async: true,  contentScript: true,  handler: this._onApiNoteView.bind(this)}],
             ['templateRender',               {async: true,  contentScript: true,  handler: this._onApiTemplateRender.bind(this)}],
@@ -468,6 +471,11 @@ class Backend {
 
         const note = await this._ankiNoteBuilder.createNote(definition, mode, context, options, templates);
         return this._anki.addNote(note);
+    }
+
+    async _onApiKoruruDefinitionAdd({definition, context, optionsContext}) {
+        const options = this.getOptions(optionsContext);
+        return this._koruru.addNote(definition, context, options)
     }
 
     async _onApiDefinitionsAddable({definitions, modes, context, optionsContext}) {

@@ -77,6 +77,10 @@ const api = (() => {
             return this._invoke('kanjiFind', {text, optionsContext});
         }
 
+        koruruDefinitionAdd(definition, context, optionsContext) {
+            return this._invoke('koruruDefinitionAdd', {definition, context, optionsContext});
+        }
+
         definitionAdd(definition, mode, context, details, optionsContext) {
             return this._invoke('definitionAdd', {definition, mode, context, details, optionsContext});
         }
