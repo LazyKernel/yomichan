@@ -18,6 +18,11 @@
 class Koruru {
     async addNote(definition, context, options) {
         const token = options.koruru.decktoken;
+
+        console.log('definition:', definition)
+        console.log('context:', context)
+        console.log('options:', options)
+
         const params = {
             word_jp: this._parseFurigana(definition.furiganaSegments),
             word_en: this._parseDefinitions(definition.definitions),
@@ -26,9 +31,6 @@ class Koruru {
             pitches: JSON.stringify(definition.pitches)
         }
 
-        console.log('definition:', definition)
-        console.log('context:', context)
-        console.log('options:', options)
         console.log('params:', params)
 
         const response = await fetch(
@@ -40,9 +42,13 @@ class Koruru {
                 credentials: 'omit',
                 redirect: 'follow',
                 referrerPolicy: 'no-referrer',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
                 body: JSON.stringify(params)
             }
         );
+
         const result = await response.json();
         if (isObject(result)) {
             const error = result.error;
@@ -58,6 +64,6 @@ class Koruru {
     }
 
     _parseDefinitions(definitions) {
-        return definitions.map(e => e.join(', ')).join(', ')
+        return definitions.map(e => e.glossary.join(', ')).join(', ')
     }
 }
